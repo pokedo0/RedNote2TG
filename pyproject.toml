@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rednote2tg"
+version = "0.1.0"
+description = "Forward Xiaohongshu notes to a Telegram channel."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiogram>=3.29.0",
+    "APScheduler>=3.11.3",
+    "PyYAML>=6.0.3",
+    "aiohttp>=3.14.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+rednote2tg = "rednote2tg.main:run"
+
+[tool.setuptools.packages.find]
+include = ["rednote2tg*"]

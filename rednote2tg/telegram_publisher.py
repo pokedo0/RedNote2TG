@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from html import escape
+from pathlib import Path
+from typing import Any
+
+from aiogram.exceptions import TelegramRetryAfter
+
+from rednote2tg.models import DownloadedMedia, MediaType, Note, PublishResult, PublishStatus
+
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramPublisher:
+    def __init__(
+        self,
+        bot: Any,
+        channel_id: str,
+        parse_mode: str = "HTML",
+        retries: int = 2,
+        retry_after_padding_seconds: float = 1.0,
+    ):
+        self.bot = bot
+        self.channel_id = channel_id
+        self.parse_mode = parse_mode
+        self.retries = retries
+        self.retry_after_padding_seconds = retry_after_padding_seconds
+
+    async def publish_note(self, note: Note, media: list[DownloadedMedia]) -> PublishResult:
+        caption = render_caption(note)
+        try:
+            if not media:
+                msg = await self._send_with_retry(
+                    self.bot.send_message,
+                    self.channel_id,
+                    caption,
+                    parse_mode=self.parse_mode,
+                )
+                return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]))
+            messages = await self._send_media(media, caption)
+            return PublishResult(PublishStatus.SENT, _message_ids(messages))
+        except TelegramRetryAfter as retry_exc:
+            return PublishResult(PublishStatus.FAILED, error_message=str(retry_exc))
+        except Exception as media_exc:
+            try:
+                msg = await self._send_with_retry(
+                    self.bot.send_message,
+                    self.channel_id,
+                    caption,
+                    parse_mode=self.parse_mode,
+                )
+                return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]), str(media_exc))
+            except TelegramRetryAfter as retry_exc:
+                return PublishResult(PublishStatus.FAILED, error_message=str(retry_exc))
+            except Exception as text_exc:
+                return PublishResult(PublishStatus.FAILED, error_message=str(text_exc))
+
+    async def _send_with_retry(self, send, *args, **kwargs):
+        for attempt in range(self.retries + 1):
+            try:
+                return await send(*args, **kwargs)
+            except TelegramRetryAfter as exc:
+                if attempt >= self.retries:
+                    raise
+                sleep_seconds = exc.retry_after + self.retry_after_padding_seconds
+                logger.warning(
+                    "telegram flood limit hit: method=%s attempt=%d/%d retry_after=%s sleep_seconds=%s",
+                    getattr(send, "__name__", type(send).__name__),
+                    attempt + 1,
+                    self.retries + 1,
+                    exc.retry_after,
+                    sleep_seconds,
+                )
+                await asyncio.sleep(sleep_seconds)
+        raise RuntimeError("telegram retry loop exited unexpectedly")
+
+    async def _send_media(self, media: list[DownloadedMedia], caption: str):
+        if len(media) == 1:
+            item = media[0]
+            payload = _file_payload(item.path)
+            if item.item.media_type is MediaType.VIDEO:
+                return [
+                    await self._send_with_retry(
+                        self.bot.send_video,
+                        self.channel_id,
+                        payload,
+                        caption=caption,
+                        parse_mode=self.parse_mode,
+                    )
+                ]
+            return [
+                await self._send_with_retry(
+                    self.bot.send_photo,
+                    self.channel_id,
+                    payload,
+                    caption=caption,
+                    parse_mode=self.parse_mode,
+                )
+            ]
+
+        all_messages = []
+        for index, chunk in enumerate(chunk_media(media, 10)):
+            if index > 0:
+                await asyncio.sleep(1)
+            group = [
+                _input_media(item, caption if index == 0 and item_index == 0 else None, self.parse_mode)
+                for item_index, item in enumerate(chunk)
+            ]
+            result = await self._send_with_retry(self.bot.send_media_group, self.channel_id, group)
+            all_messages.extend(result or [])
+        return all_messages
+
+
+def render_caption(note: Note) -> str:
+    lines = [
+        f"<b>{escape(note.display_title)}</b>",
+    ]
+    if note.description:
+        lines.append(escape(note.description))
+    if note.author:
+        lines.append(f"作者：{escape(note.author)}")
+    counts = _counts_line(note)
+    if counts:
+        lines.append(counts)
+    metadata = _metadata_line(note)
+    if metadata:
+        lines.append(metadata)
+    lines.append(f'<a href="{escape(note.url, quote=True)}">原文</a>')
+    return "\n".join(lines)
+
+
+def chunk_media(media: list[DownloadedMedia], size: int = 10) -> list[list[DownloadedMedia]]:
+    return [media[index:index + size] for index in range(0, len(media), size)]
+
+
+def _counts_line(note: Note) -> str:
+    parts = []
+    if note.liked_count is not None:
+        parts.append(f"赞 {escape(str(note.liked_count))}")
+    if note.collected_count is not None:
+        parts.append(f"藏 {escape(str(note.collected_count))}")
+    if note.comment_count is not None:
+        parts.append(f"评 {escape(str(note.comment_count))}")
+    if note.share_count is not None:
+        parts.append(f"转 {escape(str(note.share_count))}")
+    return " / ".join(parts)
+
+
+def _metadata_line(note: Note) -> str:
+    parts = []
+    if note.upload_time is not None:
+        parts.append(f"时间：{escape(str(note.upload_time))}")
+    if note.ip_location:
+        parts.append(f"IP：{escape(note.ip_location)}")
+    return " / ".join(parts)
+
+
+def _file_payload(path: Path):
+    try:
+        from aiogram.types import FSInputFile
+
+        return FSInputFile(path)
+    except Exception:
+        return str(path)
+
+
+def _input_media(item: DownloadedMedia, caption: str | None, parse_mode: str):
+    payload = _file_payload(item.path)
+    try:
+        from aiogram.types import InputMediaPhoto, InputMediaVideo
+
+        if item.item.media_type is MediaType.VIDEO:
+            return InputMediaVideo(media=payload, caption=caption, parse_mode=parse_mode if caption else None)
+        return InputMediaPhoto(media=payload, caption=caption, parse_mode=parse_mode if caption else None)
+    except Exception:
+        return {
+            "type": "video" if item.item.media_type is MediaType.VIDEO else "photo",
+            "media": payload,
+            "caption": caption,
+            "parse_mode": parse_mode if caption else None,
+        }
+
+
+def _message_ids(messages) -> tuple[int, ...]:
+    ids = []
+    for msg in messages:
+        message_id = getattr(msg, "message_id", None)
+        if message_id is not None:
+            ids.append(int(message_id))
+    return tuple(ids)

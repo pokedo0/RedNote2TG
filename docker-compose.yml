@@ -1,0 +1,13 @@
+services:
+  rednote2tg:
+    image: ghcr.io/pokedo0/rednote2tg:latest
+    container_name: rednote2tg
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      TZ: Asia/Shanghai
+      NODE_PATH: /app/node_modules
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./keyword_rules.yaml:/app/keyword_rules.yaml:ro
+      - ./data:/app/data

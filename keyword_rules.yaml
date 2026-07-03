@@ -1,0 +1,38 @@
+joiner: " "
+
+length_weights:
+  3: 0.12
+  4: 0.40
+  5: 0.38
+  6: 0.10
+
+required_pools:
+  - ["高跟", "凉鞋", "凉拖"]
+  - ["蕾丝", "水晶", "透明", "裸色", "水钻"]
+
+optional_groups:
+  attributes:
+    weight: 0.50
+    pools:
+      - ["紫色", "白色", "黑色", "银色"]
+      - ["粗跟", "一字带"]
+      - "露脚趾"
+      - ["足控", "腿"]
+
+  long_tail:
+    weight: 0.40
+    pools:
+      - ["穿搭", "搭配", "ootd"]
+      - "裙"
+      - "夏日"
+      - ["仙女", "女神", "姐", "人妻", "御姐"]
+
+  brands:
+    weight: 0.10
+    pools:
+      - ["zara", "小ck", "百丽", "思加图"]
+
+time_weights:
+  unlimited: 0.70
+  half_year: 0.20
+  one_week: 0.10

@@ -1,0 +1,41 @@
+telegram:
+  bot_token: "123456:replace-me"
+  channel_id: "@your_channel"
+  admin_user_ids: []
+
+xhs:
+  cookies: "a1=replace-me; webId=replace-me"
+  proxies: null
+
+sources:
+  keywords:
+    enabled: true
+    rules_path: "keyword_rules.yaml"
+    search_limit_per_query: 20
+    sort_type: 0
+    note_type: 0
+  homefeed:
+    enabled: false
+    categories:
+      - "homefeed_recommend"
+    limit_per_category: 20
+
+publishing:
+  notes_per_run: 3
+  media_strategy: "all"
+  caption_parse_mode: "HTML"
+  telegram_retry_after_padding_seconds: 1.0
+
+dedup:
+  ttl_days: 14
+
+schedule:
+  timezone: "Asia/Shanghai"
+  times:
+    - "09:00"
+    - "15:00"
+    - "21:00"
+
+storage:
+  sqlite_path: "data/rednote2tg.db"
+  media_temp_dir: "data/tmp_media"
