@@ -25,6 +25,9 @@ class XhsClientProtocol(Protocol):
     def homefeed_notes(self, category: str, limit: int = 20, with_detail: bool = False):
         ...
 
+    def fetch_note(self, note_url: str):
+        ...
+
 
 class XhsSource:
     def __init__(
@@ -92,6 +95,10 @@ class XhsSource:
             if note is not None:
                 normalized.append(note)
         return normalized
+
+    def fetch_note_url(self, note_url: str) -> Note | None:
+        raw = self.client.fetch_note(note_url)
+        return normalize_note(raw, SourceRef("manual", note_url))
 
 
 def normalize_note(raw: dict[str, Any], source: SourceRef) -> Note | None:

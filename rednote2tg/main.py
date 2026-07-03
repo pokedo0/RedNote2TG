@@ -38,7 +38,8 @@ async def async_main(config_path: str = "config.yaml") -> None:
         BotCommand(command="run_once", description="立即运行一次采集和发布任务"),
         BotCommand(command="status", description="查看当前系统运行状态"),
         BotCommand(command="start_tasks", description="开始定时爬取任务"),
-        BotCommand(command="stop_tasks", description="停止定时爬取任务")
+        BotCommand(command="stop_tasks", description="停止定时爬取任务"),
+        BotCommand(command="note", description="私聊抓取一个小红书笔记链接")
     ])
     try:
         await dispatcher.start_polling(bot)

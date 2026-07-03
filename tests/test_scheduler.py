@@ -7,16 +7,31 @@ from tests.test_config_models import base_config
 from rednote2tg.config import parse_config
 from rednote2tg.db import NoteStore
 from rednote2tg.models import Note, PublishResult, PublishStatus, SourceRef
-from rednote2tg.scheduler import PublishJobRunner, handle_run_once, handle_status, is_authorized, register_schedules
+from rednote2tg.scheduler import (
+    PublishJobRunner,
+    extract_xhs_url,
+    handle_fetch_note,
+    handle_run_once,
+    handle_status,
+    is_authorized,
+    register_schedules,
+)
 
 
 class FakeSource:
     def __init__(self, notes, keyword_query=None):
         self.notes = notes
         self.last_keyword_query = keyword_query
+        self.fetched_urls = []
 
     def collect(self):
         return list(self.notes), []
+
+    def fetch_note_url(self, url):
+        self.fetched_urls.append(url)
+        if self.notes:
+            return self.notes[0]
+        return None
 
 
 class FakeDownloader:
@@ -57,12 +72,16 @@ class FakeScheduler:
 
 
 class FakeMessage:
-    def __init__(self, user_id):
+    def __init__(self, user_id, text="", chat_type="private"):
         self.from_user = SimpleNamespace(id=user_id)
+        self.text = text
+        self.chat = SimpleNamespace(type=chat_type)
         self.answers = []
+        self.answer_kwargs = []
 
-    async def answer(self, text):
+    async def answer(self, text, **kwargs):
         self.answers.append(text)
+        self.answer_kwargs.append(kwargs)
 
 
 def note(note_id):
@@ -225,6 +244,57 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await handle_status(message, store, scheduler, ())
 
             self.assertIn("status:", message.answers[0])
+            store.close()
+
+    def test_extract_xhs_url_from_command_text(self):
+        url = (
+            "https://www.xiaohongshu.com/explore/6937d509000000001d039d86"
+            "?xsec_token=abc&xsec_source=pc_search"
+        )
+
+        self.assertEqual(extract_xhs_url(f"/note {url}。"), url)
+        self.assertIsNone(extract_xhs_url("/note https://example.com/a"))
+
+    async def test_note_command_fetches_single_note_in_private_chat(self):
+        config = parse_config(base_config())
+        fetched_note = Note(
+            note_id="n1",
+            url="https://www.xiaohongshu.com/explore/n1",
+            title="标题",
+            description="正文",
+            author="作者",
+            source=SourceRef("manual", "url"),
+        )
+        source = FakeSource([fetched_note])
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(
+                1,
+                "/note https://www.xiaohongshu.com/explore/n1?xsec_token=abc",
+                "private",
+            )
+
+            await handle_fetch_note(message, runner, ())
+
+            self.assertEqual(source.fetched_urls, ["https://www.xiaohongshu.com/explore/n1?xsec_token=abc"])
+            self.assertIn("<b>标题</b>", message.answers[0])
+            self.assertIn("正文", message.answers[0])
+            self.assertEqual(message.answer_kwargs[0], {"parse_mode": "HTML"})
+            store.close()
+
+    async def test_note_command_requires_private_chat(self):
+        config = parse_config(base_config())
+        source = FakeSource([note("n1")])
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(1, "/note https://www.xiaohongshu.com/explore/n1", "group")
+
+            await handle_fetch_note(message, runner, ())
+
+            self.assertEqual(message.answers, ["请私聊发送 /note <小红书笔记链接>"])
+            self.assertEqual(source.fetched_urls, [])
             store.close()
 
 

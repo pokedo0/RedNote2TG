@@ -28,6 +28,16 @@ class FakeXhsClient:
         self.calls.append(("homefeed", category, limit, with_detail))
         return [{"note_id": f"{category}-1", "url": f"https://xhs/{category}-1", "video_addr": "https://v/1.mp4"}]
 
+    def fetch_note(self, note_url):
+        self.calls.append(("fetch_note", note_url))
+        return {
+            "note_id": "manual-1",
+            "note_url": note_url,
+            "title": "Manual",
+            "desc": "Text",
+            "nickname": "Author",
+        }
+
 
 def write_rules(directory: str) -> str:
     path = Path(directory) / "keyword_rules.yaml"
@@ -99,6 +109,20 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(errors[0].source_key, "generated")
         self.assertEqual([call[0] for call in client.calls], ["homefeed"])
         self.assertEqual([note.source.source_type for note in notes], ["homefeed"])
+
+    def test_fetch_note_url_normalizes_single_manual_note(self):
+        client = FakeXhsClient()
+        source = XhsSource(XhsConfig("cookie"), source_config("unused.yaml"), client=client)
+
+        note = source.fetch_note_url("https://www.xiaohongshu.com/explore/manual-1?xsec_token=abc")
+
+        self.assertIsNotNone(note)
+        self.assertEqual(note.note_id, "manual-1")
+        self.assertEqual(note.title, "Manual")
+        self.assertEqual(note.description, "Text")
+        self.assertEqual(note.author, "Author")
+        self.assertEqual(note.source.source_type, "manual")
+        self.assertEqual(client.calls, [("fetch_note", "https://www.xiaohongshu.com/explore/manual-1?xsec_token=abc")])
 
 
 if __name__ == "__main__":

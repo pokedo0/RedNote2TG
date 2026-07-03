@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from time import perf_counter
 from datetime import UTC, datetime
 from typing import Any
@@ -11,10 +12,11 @@ from rednote2tg.db import NoteStore
 from rednote2tg.keyword_rules import describe_note_time
 from rednote2tg.media import MediaDownloader
 from rednote2tg.models import PublishResult, PublishStatus
-from rednote2tg.telegram_publisher import TelegramPublisher
+from rednote2tg.telegram_publisher import TelegramPublisher, render_caption
 from rednote2tg.xhs_source import XhsSource
 
 logger = logging.getLogger(__name__)
+XHS_URL_PATTERN = re.compile(r"https?://[^\s<>]*xiaohongshu\.com/[^\s<>]+")
 
 
 class PublishJobRunner:
@@ -196,6 +198,41 @@ async def handle_stop_tasks(message, scheduler, admin_user_ids: tuple[int, ...])
         await message.answer("未配置调度器")
 
 
+async def handle_fetch_note(message, runner: PublishJobRunner, admin_user_ids: tuple[int, ...]) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, admin_user_ids):
+        await message.answer("unauthorized")
+        return
+    chat_type = getattr(getattr(message, "chat", None), "type", None)
+    if chat_type is not None and chat_type != "private":
+        await message.answer("请私聊发送 /note <小红书笔记链接>")
+        return
+
+    url = extract_xhs_url(getattr(message, "text", "") or "")
+    if not url:
+        await message.answer("用法：/note <小红书笔记链接>")
+        return
+
+    try:
+        note = runner.source.fetch_note_url(url)
+    except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
+        logger.exception("manual note fetch failed: %s", url)
+        await message.answer(f"抓取失败：{exc}")
+        return
+    if note is None:
+        await message.answer("未解析到笔记内容")
+        return
+
+    await message.answer(render_caption(note), parse_mode=getattr(runner.publisher, "parse_mode", "HTML"))
+
+
+def extract_xhs_url(text: str) -> str | None:
+    match = XHS_URL_PATTERN.search(text)
+    if match is None:
+        return None
+    return match.group(0).rstrip(".,;，。；")
+
+
 def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, scheduler, admin_user_ids: tuple[int, ...]) -> None:
     try:
         from aiogram.filters import Command
@@ -217,3 +254,7 @@ def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, sc
     @dispatcher.message(Command("stop_tasks"))
     async def _stop_tasks(message):
         await handle_stop_tasks(message, scheduler, admin_user_ids)
+
+    @dispatcher.message(Command("note"))
+    async def _note(message):
+        await handle_fetch_note(message, runner, admin_user_ids)
