@@ -1,6 +1,8 @@
 services:
   rednote2tg:
+    #    build: .
     image: ghcr.io/pokedo0/rednote2tg:latest
+    pull_policy: always
     container_name: rednote2tg
     restart: unless-stopped
     working_dir: /app

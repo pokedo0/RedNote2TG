@@ -4,14 +4,24 @@ import asyncio
 import logging
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods.base import TelegramMethod
+from aiogram.types import Message
 
 from rednote2tg.models import DownloadedMedia, MediaType, Note, PublishResult, PublishStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+class RawSendMediaGroup(TelegramMethod[list[Message]]):
+    __returning__: ClassVar[Any] = list[Message]
+    __api_method__: ClassVar[str] = "sendMediaGroup"
+
+    chat_id: str
+    media: list[dict[str, Any]]
 
 
 class TelegramPublisher:
@@ -79,39 +89,53 @@ class TelegramPublisher:
 
     async def _send_media(self, media: list[DownloadedMedia], caption: str):
         if len(media) == 1:
-            item = media[0]
-            payload = _file_payload(item.path)
-            if item.item.media_type is MediaType.VIDEO:
-                return [
-                    await self._send_with_retry(
-                        self.bot.send_video,
-                        self.channel_id,
-                        payload,
-                        caption=caption,
-                        parse_mode=self.parse_mode,
-                    )
-                ]
-            return [
-                await self._send_with_retry(
-                    self.bot.send_photo,
-                    self.channel_id,
-                    payload,
-                    caption=caption,
-                    parse_mode=self.parse_mode,
-                )
-            ]
+            return [await self._send_single_media(media[0], caption)]
 
         all_messages = []
         for index, chunk in enumerate(chunk_media(media, 10)):
             if index > 0:
                 await asyncio.sleep(1)
-            group = [
-                _input_media(item, caption if index == 0 and item_index == 0 else None, self.parse_mode)
-                for item_index, item in enumerate(chunk)
-            ]
-            result = await self._send_with_retry(self.bot.send_media_group, self.channel_id, group)
+            result = await self._send_media_chunk(chunk, caption if index == 0 else None)
             all_messages.extend(result or [])
         return all_messages
+
+    async def _send_single_media(self, item: DownloadedMedia, caption: str):
+        payload = _file_payload(item.path)
+        if _can_send_live_photo(item):
+            return await self._send_with_retry(
+                self.bot.send_live_photo,
+                self.channel_id,
+                _file_payload(item.live_video_path),
+                payload,
+                caption=caption,
+                parse_mode=self.parse_mode,
+            )
+        send = self.bot.send_video if item.item.media_type is MediaType.VIDEO else self.bot.send_photo
+        return await self._send_with_retry(
+            send,
+            self.channel_id,
+            payload,
+            caption=caption,
+            parse_mode=self.parse_mode,
+        )
+
+    async def _send_media_chunk(self, chunk: list[DownloadedMedia], caption: str | None):
+        use_raw_group = _needs_raw_media_group(chunk)
+        group = [
+            _album_input_media(
+                item,
+                caption if item_index == 0 else None,
+                self.parse_mode,
+                use_raw_group,
+            )
+            for item_index, item in enumerate(chunk)
+        ]
+        if use_raw_group:
+            return await self._send_with_retry(
+                self.bot.__call__,
+                RawSendMediaGroup(chat_id=self.channel_id, media=group),
+            )
+        return await self._send_with_retry(self.bot.send_media_group, self.channel_id, group)
 
 
 def render_caption(note: Note) -> str:
@@ -182,6 +206,42 @@ def _input_media(item: DownloadedMedia, caption: str | None, parse_mode: str):
             "caption": caption,
             "parse_mode": parse_mode if caption else None,
         }
+
+
+def _album_input_media(
+    item: DownloadedMedia,
+    caption: str | None,
+    parse_mode: str,
+    use_raw_group: bool,
+):
+    if use_raw_group:
+        return _raw_input_media(item, caption, parse_mode)
+    return _input_media(item, caption, parse_mode)
+
+
+def _raw_input_media(item: DownloadedMedia, caption: str | None, parse_mode: str) -> dict[str, Any]:
+    if _can_send_live_photo(item):
+        return {
+            "type": "live_photo",
+            "media": _file_payload(item.live_video_path),
+            "photo": _file_payload(item.path),
+            "caption": caption,
+            "parse_mode": parse_mode if caption else None,
+        }
+    return {
+        "type": "video" if item.item.media_type is MediaType.VIDEO else "photo",
+        "media": _file_payload(item.path),
+        "caption": caption,
+        "parse_mode": parse_mode if caption else None,
+    }
+
+
+def _needs_raw_media_group(items: list[DownloadedMedia]) -> bool:
+    return any(_can_send_live_photo(item) for item in items)
+
+
+def _can_send_live_photo(item: DownloadedMedia) -> bool:
+    return item.item.media_type is MediaType.LIVE_PHOTO and item.live_video_path is not None
 
 
 def _message_ids(messages) -> tuple[int, ...]:

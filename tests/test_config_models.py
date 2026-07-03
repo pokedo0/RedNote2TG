@@ -41,6 +41,7 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.sources.keywords.rules_path, "keyword_rules.yaml")
         self.assertEqual(config.publishing.notes_per_run, 3)
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 1.0)
+        self.assertTrue(config.publishing.upload_live_photo)
 
     def test_parse_config_accepts_retry_after_padding(self):
         data = base_config()
@@ -49,6 +50,14 @@ class ConfigModelsTest(unittest.TestCase):
         config = parse_config(data)
 
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 2.5)
+
+    def test_parse_config_accepts_upload_live_photo_false(self):
+        data = base_config()
+        data["publishing"]["upload_live_photo"] = False
+
+        config = parse_config(data)
+
+        self.assertFalse(config.publishing.upload_live_photo)
 
     def test_load_config_reads_yaml_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,6 +105,13 @@ class ConfigModelsTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config(data)
 
+    def test_rejects_non_boolean_upload_live_photo(self):
+        data = base_config()
+        data["publishing"]["upload_live_photo"] = "false"
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
     def test_rejects_bad_schedule_time(self):
         data = base_config()
         data["schedule"]["times"] = ["24:00"]
@@ -120,6 +136,25 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(note.note_id, "n1")
         self.assertEqual(note.media[0].media_type, MediaType.IMAGE)
         self.assertEqual(note.media[1].media_type, MediaType.VIDEO)
+
+    def test_normalize_note_extracts_live_photo_media(self):
+        note = normalize_note(
+            {
+                "note_id": "n1",
+                "note_url": "https://xhs/n1",
+                "image_list": ["https://img/1.jpg", "https://img/2.jpg", "https://img/3.jpg"],
+                "live_video_list": ["https://video/1.mp4", None, "https://video/3.mp4"],
+            },
+            SourceRef("keyword", "榴莲"),
+        )
+
+        self.assertEqual(
+            [item.media_type for item in note.media],
+            [MediaType.LIVE_PHOTO, MediaType.IMAGE, MediaType.LIVE_PHOTO],
+        )
+        self.assertEqual(note.media[0].live_video_url, "https://video/1.mp4")
+        self.assertIsNone(note.media[1].live_video_url)
+        self.assertEqual(note.media[2].live_video_url, "https://video/3.mp4")
 
 
 if __name__ == "__main__":

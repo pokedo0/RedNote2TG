@@ -22,8 +22,10 @@ class FakeSource:
 class FakeDownloader:
     def __init__(self):
         self.cleaned = False
+        self.upload_live_photo = None
 
-    async def download_all(self, note_id, media):
+    async def download_all(self, note_id, media, upload_live_photo=True):
+        self.upload_live_photo = upload_live_photo
         return []
 
     def cleanup(self):
@@ -120,6 +122,20 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             second_result = await runner.run_once()
             self.assertEqual(second_result["published"], 1)
             self.assertTrue(store.is_active("n1"))
+            store.close()
+
+    async def test_runner_passes_live_photo_upload_config_to_downloader(self):
+        data = base_config()
+        data["publishing"]["upload_live_photo"] = False
+        config = parse_config(data)
+        downloader = FakeDownloader()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, FakeSource([note("n1")]), store, downloader, FakePublisher())
+
+            await runner.run_once()
+
+            self.assertFalse(downloader.upload_live_photo)
             store.close()
 
     def test_register_schedules_adds_one_job_per_time(self):

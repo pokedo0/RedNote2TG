@@ -18,6 +18,7 @@ optional_groups:
       - ["粗跟", "一字带"]
       - "露脚趾"
       - ["足控", "腿"]
+      - "闪"
 
   long_tail:
     weight: 0.40

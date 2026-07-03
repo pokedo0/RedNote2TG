@@ -15,7 +15,7 @@ class DrySource:
 
 
 class DryDownloader:
-    async def download_all(self, note_id, media):
+    async def download_all(self, note_id, media, upload_live_photo=True):
         return []
 
     def cleanup(self):

@@ -53,6 +53,7 @@ class PublishingConfig:
     media_strategy: str = "all"
     caption_parse_mode: str = "HTML"
     telegram_retry_after_padding_seconds: float = 1.0
+    upload_live_photo: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,7 @@ def _parse_publishing(data: dict) -> PublishingConfig:
             data.get("telegram_retry_after_padding_seconds", 1.0),
             "publishing.telegram_retry_after_padding_seconds",
         ),
+        upload_live_photo=_bool(data.get("upload_live_photo", True), "publishing.upload_live_photo"),
     )
 
 
@@ -222,6 +224,12 @@ def _nonnegative_float(value: object, name: str) -> float:
     if parsed < 0:
         raise ConfigError(f"{name} must be greater than or equal to zero")
     return parsed
+
+
+def _bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be a boolean")
+    return value
 
 
 def _validate_time(value: str) -> None:

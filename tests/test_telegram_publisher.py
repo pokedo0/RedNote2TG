@@ -18,6 +18,10 @@ class FakeBot:
         self.retry_after_group_failures = 0
         self.next_id = 1
 
+    async def __call__(self, method):
+        self.calls.append(("raw", method))
+        return [self._msg() for _ in method.media]
+
     async def send_message(self, chat_id, text, parse_mode=None):
         self.calls.append(("message", chat_id, text, parse_mode))
         return self._msg()
@@ -32,6 +36,12 @@ class FakeBot:
         if self.fail_media:
             raise RuntimeError("video failed")
         self.calls.append(("video", chat_id, video, caption, parse_mode))
+        return self._msg()
+
+    async def send_live_photo(self, chat_id, live_photo, photo, caption=None, parse_mode=None):
+        if self.fail_media:
+            raise RuntimeError("live photo failed")
+        self.calls.append(("live_photo", chat_id, live_photo, photo, caption, parse_mode))
         return self._msg()
 
     async def send_media_group(self, chat_id, media):
@@ -99,6 +109,48 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
             path = Path(tmp) / "a.jpg"
             path.write_bytes(b"x")
             media = [DownloadedMedia(MediaItem("https://x/a.jpg", MediaType.IMAGE), path, 1)]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@c")
+
+            result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "photo")
+
+    async def test_single_live_photo_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            photo = Path(tmp) / "a.jpg"
+            video = Path(tmp) / "a.mp4"
+            photo.write_bytes(b"x")
+            video.write_bytes(b"v")
+            media = [
+                DownloadedMedia(
+                    MediaItem("https://x/a.jpg", MediaType.LIVE_PHOTO, live_video_url="https://x/a.mp4"),
+                    photo,
+                    1,
+                    live_video_path=video,
+                    live_video_size_bytes=1,
+                )
+            ]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@c")
+
+            result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "live_photo")
+
+    async def test_live_photo_without_downloaded_video_publishes_as_photo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.jpg"
+            path.write_bytes(b"x")
+            media = [
+                DownloadedMedia(
+                    MediaItem("https://x/a.jpg", MediaType.LIVE_PHOTO, live_video_url="https://x/a.mp4"),
+                    path,
+                    1,
+                )
+            ]
             bot = FakeBot()
             publisher = TelegramPublisher(bot, "@c")
 
@@ -187,6 +239,37 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         
         self.assertIsNotNone(first_caption)
         self.assertIsNone(second_caption)
+
+    async def test_mixed_live_photo_album_uses_raw_media_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            photo_path = Path(tmp) / "photo.jpg"
+            live_photo_path = Path(tmp) / "live.jpg"
+            live_video_path = Path(tmp) / "live.mp4"
+            photo_path.write_bytes(b"x")
+            live_photo_path.write_bytes(b"x")
+            live_video_path.write_bytes(b"v")
+            media = [
+                DownloadedMedia(MediaItem("https://x/photo.jpg", MediaType.IMAGE), photo_path, 1),
+                DownloadedMedia(
+                    MediaItem("https://x/live.jpg", MediaType.LIVE_PHOTO, live_video_url="https://x/live.mp4"),
+                    live_photo_path,
+                    1,
+                    live_video_path=live_video_path,
+                    live_video_size_bytes=1,
+                ),
+            ]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@c")
+
+            result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "raw")
+        raw_method = bot.calls[0][1]
+        self.assertEqual(raw_method.__api_method__, "sendMediaGroup")
+        self.assertEqual([item["type"] for item in raw_method.media], ["photo", "live_photo"])
+        self.assertIsNotNone(raw_method.media[0]["caption"])
+        self.assertIsNone(raw_method.media[1]["caption"])
 
 
 if __name__ == "__main__":

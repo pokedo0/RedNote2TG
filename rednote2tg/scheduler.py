@@ -57,7 +57,11 @@ class PublishJobRunner:
                     note.display_title,
                     len(note.media),
                 )
-                downloads = await self.downloader.download_all(note.note_id, note.media)
+                downloads = await self.downloader.download_all(
+                    note.note_id,
+                    note.media,
+                    upload_live_photo=self.config.publishing.upload_live_photo,
+                )
                 result = await self.publisher.publish_note(note, downloads)
             except Exception as exc:
                 logger.exception("note publish failed: %s", note.note_id)

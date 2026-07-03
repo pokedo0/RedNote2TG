@@ -9,6 +9,7 @@ from typing import Any
 class MediaType(StrEnum):
     IMAGE = "image"
     VIDEO = "video"
+    LIVE_PHOTO = "live_photo"
 
 
 class PublishStatus(StrEnum):
@@ -29,6 +30,7 @@ class MediaItem:
     url: str
     media_type: MediaType
     filename_hint: str | None = None
+    live_video_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,9 @@ class DownloadedMedia:
     path: Path
     size_bytes: int
     content_type: str | None = None
+    live_video_path: Path | None = None
+    live_video_size_bytes: int | None = None
+    live_video_content_type: str | None = None
 
 
 @dataclass(frozen=True)

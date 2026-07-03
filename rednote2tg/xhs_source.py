@@ -100,9 +100,21 @@ def normalize_note(raw: dict[str, Any], source: SourceRef) -> Note | None:
         return None
     url = _first(raw, "note_url", "url") or f"https://www.xiaohongshu.com/explore/{note_id}"
     media: list[MediaItem] = []
+    live_video_list = raw.get("live_video_list") or ()
+    if not isinstance(live_video_list, (list, tuple)):
+        live_video_list = ()
     for idx, image_url in enumerate(raw.get("image_list") or []):
         if image_url:
-            media.append(MediaItem(str(image_url), MediaType.IMAGE, f"{note_id}_image_{idx}"))
+            live_video_url = live_video_list[idx] if idx < len(live_video_list) else None
+            media_type = MediaType.LIVE_PHOTO if live_video_url else MediaType.IMAGE
+            media.append(
+                MediaItem(
+                    str(image_url),
+                    media_type,
+                    f"{note_id}_image_{idx}",
+                    str(live_video_url) if live_video_url else None,
+                )
+            )
     video_url = _first(raw, "video_addr", "video_url")
     if video_url:
         media.append(MediaItem(str(video_url), MediaType.VIDEO, f"{note_id}_video"))
