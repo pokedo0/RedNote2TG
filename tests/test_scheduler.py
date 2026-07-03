@@ -48,13 +48,21 @@ class FakeDownloader:
 
 
 class FakePublisher:
+    def __init__(self):
+        self.debug_messages = []
+        self.telegram_retry_after_count = 0
+
     async def publish_note(self, note, media):
         return PublishResult(PublishStatus.SENT_DEGRADED, (100,))
+
+    async def send_debug_message(self, text):
+        self.debug_messages.append(text)
 
 
 class SequencePublisher:
     def __init__(self, results):
         self.results = list(results)
+        self.telegram_retry_after_count = 0
 
     async def publish_note(self, note, media):
         return self.results.pop(0)
@@ -112,9 +120,66 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["source_collected_errors"], 0)
             self.assertEqual(result["keyword_query"], "")
             self.assertEqual(result["keyword_time_filter"], "-")
+            self.assertEqual(result["telegram_retry_after_count"], 0)
             self.assertEqual(second_result["published"], 1)
             self.assertTrue(store.is_active("n1"))
             self.assertTrue(store.is_active("n2"))
+            store.close()
+
+    async def test_runner_reports_retry_after_count_delta(self):
+        config = parse_config(base_config())
+        publisher = FakePublisher()
+        publisher.telegram_retry_after_count = 4
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, FakeSource([note("n1")]), store, FakeDownloader(), publisher)
+
+            original_publish = publisher.publish_note
+
+            async def publish_note(note, media):
+                publisher.telegram_retry_after_count += 2
+                return await original_publish(note, media)
+
+            publisher.publish_note = publish_note
+            result = await runner.run_once()
+
+            self.assertEqual(result["telegram_retry_after_count"], 2)
+            store.close()
+
+    async def test_runner_sends_debug_summary_to_channel_after_published_note(self):
+        data = base_config()
+        data["debug"] = {"enabled": True}
+        config = parse_config(data)
+        publisher = FakePublisher()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, FakeSource([note("n1")]), store, FakeDownloader(), publisher)
+
+            await runner.run_once()
+
+            self.assertEqual(len(publisher.debug_messages), 1)
+            self.assertIn("run_once done:", publisher.debug_messages[0])
+            self.assertIn("TelegramRetryAfter count=0", publisher.debug_messages[0])
+            store.close()
+
+    async def test_runner_skips_debug_summary_when_nothing_published(self):
+        data = base_config()
+        data["debug"] = {"enabled": True}
+        config = parse_config(data)
+        publisher = SequencePublisher([PublishResult(PublishStatus.FAILED, error_message="bad")])
+        publisher.debug_messages = []
+
+        async def send_debug_message(text):
+            publisher.debug_messages.append(text)
+
+        publisher.send_debug_message = send_debug_message
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, FakeSource([note("n1")]), store, FakeDownloader(), publisher)
+
+            await runner.run_once()
+
+            self.assertEqual(publisher.debug_messages, [])
             store.close()
 
     async def test_runner_retries_note_after_failed_publish(self):

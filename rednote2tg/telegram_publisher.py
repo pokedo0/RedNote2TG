@@ -38,6 +38,7 @@ class TelegramPublisher:
         self.parse_mode = parse_mode
         self.retries = retries
         self.retry_after_padding_seconds = retry_after_padding_seconds
+        self.telegram_retry_after_count = 0
 
     async def publish_note(self, note: Note, media: list[DownloadedMedia]) -> PublishResult:
         caption = render_caption(note)
@@ -73,6 +74,7 @@ class TelegramPublisher:
             try:
                 return await send(*args, **kwargs)
             except TelegramRetryAfter as exc:
+                self.telegram_retry_after_count += 1
                 if attempt >= self.retries:
                     raise
                 sleep_seconds = exc.retry_after + self.retry_after_padding_seconds
@@ -86,6 +88,14 @@ class TelegramPublisher:
                 )
                 await asyncio.sleep(sleep_seconds)
         raise RuntimeError("telegram retry loop exited unexpectedly")
+
+    async def send_debug_message(self, text: str):
+        return await self._send_with_retry(
+            self.bot.send_message,
+            self.channel_id,
+            text,
+            parse_mode=None,
+        )
 
     async def _send_media(self, media: list[DownloadedMedia], caption: str):
         if len(media) == 1:

@@ -192,6 +192,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, PublishStatus.SENT)
         self.assertEqual(bot.group_attempts, 2)
+        self.assertEqual(publisher.telegram_retry_after_count, 1)
         sleep.assert_awaited_once_with(31.0)
         self.assertIn("telegram flood limit hit", logs.output[0])
         self.assertIn("retry_after=30", logs.output[0])
@@ -213,6 +214,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, PublishStatus.FAILED)
         self.assertEqual(bot.group_attempts, 3)
+        self.assertEqual(publisher.telegram_retry_after_count, 3)
         self.assertEqual(sleep.await_count, 2)
         self.assertFalse(any(call[0] == "message" for call in bot.calls))
 

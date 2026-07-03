@@ -74,6 +74,11 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class DebugConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     xhs: XhsConfig
@@ -82,6 +87,7 @@ class AppConfig:
     dedup: DedupConfig
     schedule: ScheduleConfig
     storage: StorageConfig
+    debug: DebugConfig
 
 
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -106,6 +112,7 @@ def parse_config(data: dict, base_path: str | Path | None = None) -> AppConfig:
     dedup = _parse_dedup(data.get("dedup") or {})
     schedule = _parse_schedule(data.get("schedule") or {})
     storage = _parse_storage(data.get("storage") or {})
+    debug = _parse_debug(data.get("debug") or {})
     return AppConfig(
         telegram=telegram,
         xhs=xhs,
@@ -114,6 +121,7 @@ def parse_config(data: dict, base_path: str | Path | None = None) -> AppConfig:
         dedup=dedup,
         schedule=schedule,
         storage=storage,
+        debug=debug,
     )
 
 
@@ -204,6 +212,10 @@ def _parse_storage(data: dict) -> StorageConfig:
         sqlite_path=str(data.get("sqlite_path", "data/rednote2tg.db")),
         media_temp_dir=str(data.get("media_temp_dir", "data/tmp_media")),
     )
+
+
+def _parse_debug(data: dict) -> DebugConfig:
+    return DebugConfig(enabled=_bool(data.get("enabled", False), "debug.enabled"))
 
 
 def _positive_int(value: object, name: str) -> int:

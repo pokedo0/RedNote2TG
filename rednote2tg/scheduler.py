@@ -36,6 +36,7 @@ class PublishJobRunner:
 
     async def run_once(self) -> dict[str, Any]:
         started_at = perf_counter()
+        retry_after_start = getattr(self.publisher, "telegram_retry_after_count", 0)
         logger.info("run_once started")
         self.store.cleanup_expired()
         notes, errors = self.source.collect()
@@ -106,8 +107,18 @@ class PublishJobRunner:
             "keyword_query": keyword_query.query if keyword_query is not None else "",
             "keyword_note_time": keyword_query.note_time if keyword_query is not None else None,
             "keyword_time_filter": describe_note_time(keyword_query.note_time if keyword_query is not None else None),
+            "telegram_retry_after_count": max(
+                0,
+                getattr(self.publisher, "telegram_retry_after_count", retry_after_start)
+                - retry_after_start,
+            ),
         }
         logger.info(format_run_once_summary(summary))
+        if self.config.debug.enabled and published > 0:
+            try:
+                await self.publisher.send_debug_message(format_run_once_summary(summary))
+            except Exception:
+                logger.exception("debug summary send failed")
         return summary
 
 
@@ -156,6 +167,7 @@ def format_run_once_summary(result: dict[str, Any]) -> str:
         f"  publish published={result['published']} skipped={result['skipped']} failed={result['failed']} "
         f"source_errors={result['source_errors']}\n"
         f"  keyword query={result['keyword_query'] or '-'} time_filter={result['keyword_time_filter']}\n"
+        f"  TelegramRetryAfter count={result.get('telegram_retry_after_count', 0)}\n"
         f"  elapsed={result['elapsed_seconds']:.3f}s"
     )
 

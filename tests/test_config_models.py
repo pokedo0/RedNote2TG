@@ -42,6 +42,7 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.publishing.notes_per_run, 3)
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 1.0)
         self.assertTrue(config.publishing.upload_live_photo)
+        self.assertFalse(config.debug.enabled)
 
     def test_parse_config_accepts_retry_after_padding(self):
         data = base_config()
@@ -58,6 +59,14 @@ class ConfigModelsTest(unittest.TestCase):
         config = parse_config(data)
 
         self.assertFalse(config.publishing.upload_live_photo)
+
+    def test_parse_config_accepts_debug_enabled(self):
+        data = base_config()
+        data["debug"] = {"enabled": True}
+
+        config = parse_config(data)
+
+        self.assertTrue(config.debug.enabled)
 
     def test_load_config_reads_yaml_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +117,13 @@ class ConfigModelsTest(unittest.TestCase):
     def test_rejects_non_boolean_upload_live_photo(self):
         data = base_config()
         data["publishing"]["upload_live_photo"] = "false"
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_rejects_non_boolean_debug_enabled(self):
+        data = base_config()
+        data["debug"] = {"enabled": "false"}
 
         with self.assertRaises(ConfigError):
             parse_config(data)

@@ -27,6 +27,9 @@ publishing:
   telegram_retry_after_padding_seconds: 1.0
   upload_live_photo: true  # false = Live Photo 按普通图片上传
 
+debug:
+  enabled: false
+
 dedup:
   ttl_days: 14
 
