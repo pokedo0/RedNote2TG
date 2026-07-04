@@ -132,17 +132,62 @@ def create_scheduler(config: AppConfig, runner: PublishJobRunner):
 
 def register_schedules(scheduler, config: AppConfig, runner: PublishJobRunner) -> None:
     timezone = ZoneInfo(config.schedule.timezone)
-    for value in config.schedule.times:
-        hour, minute = (int(part) for part in value.split(":", 1))
+    quiet_start = _time_to_minutes(config.schedule.quiet_window.start)
+    quiet_end = _time_to_minutes(config.schedule.quiet_window.end)
+    jitter_seconds = config.schedule.jitter_minutes * 60
+    for minute_of_day in _scheduled_minutes(
+        config.schedule.interval_minutes,
+        config.schedule.jitter_minutes,
+        quiet_start,
+        quiet_end,
+    ):
+        hour, minute = divmod(minute_of_day, 60)
+        time_value = f"{hour:02d}:{minute:02d}"
         scheduler.add_job(
             runner.run_once,
             "cron",
             hour=hour,
             minute=minute,
             timezone=timezone,
-            id=f"publish-{value}",
+            jitter=jitter_seconds,
+            id=f"publish-{time_value}",
             replace_existing=True,
         )
+
+
+def _scheduled_minutes(
+    interval_minutes: int,
+    jitter_minutes: int,
+    quiet_start: int,
+    quiet_end: int,
+) -> tuple[int, ...]:
+    return tuple(
+        minute
+        for minute in range(0, 24 * 60, interval_minutes)
+        if not _minute_in_quiet_window(minute, quiet_start, quiet_end)
+        and not _jitter_can_enter_quiet_window(minute, jitter_minutes, quiet_start, quiet_end)
+    )
+
+
+def _jitter_can_enter_quiet_window(base_minute: int, jitter_minutes: int, quiet_start: int, quiet_end: int) -> bool:
+    if jitter_minutes >= 24 * 60:
+        return True
+    return any(
+        _minute_in_quiet_window(base_minute + offset, quiet_start, quiet_end)
+        for offset in range(jitter_minutes + 1)
+    )
+
+
+def _minute_in_quiet_window(minute: int, quiet_start: int, quiet_end: int) -> bool:
+    minute %= 24 * 60
+    if quiet_start < quiet_end:
+        return quiet_start <= minute < quiet_end
+    return minute >= quiet_start or minute < quiet_end
+
+
+def _time_to_minutes(value: str) -> int:
+    hour, minute = (int(part) for part in value.split(":", 1))
+    return hour * 60 + minute
 
 
 def is_authorized(user_id: int | None, admin_user_ids: tuple[int, ...]) -> bool:
@@ -172,17 +217,45 @@ def format_run_once_summary(result: dict[str, Any]) -> str:
     )
 
 
-async def handle_status(message, store: NoteStore, scheduler, admin_user_ids: tuple[int, ...]) -> None:
+async def handle_status(
+    message,
+    store: NoteStore,
+    scheduler,
+    admin_user_ids: tuple[int, ...],
+    config: AppConfig | None = None,
+) -> None:
     user_id = getattr(getattr(message, "from_user", None), "id", None)
     if not is_authorized(user_id, admin_user_ids):
         await message.answer("unauthorized")
         return
     summary = store.summary(datetime.now(UTC))
     jobs = scheduler.get_jobs() if scheduler is not None else []
+    timezone = ZoneInfo(config.schedule.timezone) if config is not None else UTC
     await message.answer(
         "status: "
-        f"jobs={len(jobs)} active_dedup={summary.active_dedup_count} "
+        f"jobs={len(jobs)} next_run={_format_next_run(jobs, timezone)} "
+        f"{_format_schedule_status(config)} active_dedup={summary.active_dedup_count} "
         f"sent={summary.recent_sent_count} failed={summary.recent_failed_count}"
+    )
+
+
+def _format_next_run(jobs, timezone) -> str:
+    next_runs = [getattr(job, "next_run_time", None) for job in jobs]
+    next_runs = [value for value in next_runs if value is not None]
+    if not next_runs:
+        return "-"
+    return min(next_runs).astimezone(timezone).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _format_schedule_status(config: AppConfig | None) -> str:
+    if config is None:
+        return "schedule=-"
+    schedule = config.schedule
+    return (
+        "schedule=interval "
+        f"interval={schedule.interval_minutes}m "
+        f"jitter=0-{schedule.jitter_minutes}m "
+        f"quiet={schedule.quiet_window.start}-{schedule.quiet_window.end}"
     )
 
 
@@ -273,7 +346,7 @@ def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, sc
 
     @dispatcher.message(Command("status"))
     async def _status(message):
-        await handle_status(message, store, scheduler, admin_user_ids)
+        await handle_status(message, store, scheduler, admin_user_ids, runner.config)
 
     @dispatcher.message(Command("start_tasks"))
     async def _start_tasks(message):

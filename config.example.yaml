@@ -24,7 +24,7 @@ publishing:
   notes_per_run: 5
   media_strategy: "all"
   caption_parse_mode: "HTML"
-  telegram_retry_after_padding_seconds: 1.0
+  telegram_retry_after_padding_seconds: 2
   upload_live_photo: true  # false = Live Photo 按普通图片上传
 
 debug:
@@ -35,10 +35,11 @@ dedup:
 
 schedule:
   timezone: "Asia/Shanghai"
-  times:
-    - "09:00"
-    - "15:00"
-    - "21:00"
+  interval_minutes: 50
+  jitter_minutes: 10
+  quiet_window:
+    start: "03:00"
+    end: "09:00"
 
 storage:
   sqlite_path: "data/rednote2tg.db"

@@ -62,9 +62,17 @@ class DedupConfig:
 
 
 @dataclass(frozen=True)
+class QuietWindowConfig:
+    start: str
+    end: str
+
+
+@dataclass(frozen=True)
 class ScheduleConfig:
-    timezone: str = "Asia/Shanghai"
-    times: tuple[str, ...] = ()
+    timezone: str
+    interval_minutes: int
+    jitter_minutes: int
+    quiet_window: QuietWindowConfig
 
 
 @dataclass(frozen=True)
@@ -201,10 +209,28 @@ def _parse_schedule(data: dict) -> ScheduleConfig:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
         raise ConfigError(f"unknown schedule.timezone: {timezone}") from exc
-    times = tuple(str(value) for value in data.get("times") or ())
-    for value in times:
-        _validate_time(value)
-    return ScheduleConfig(timezone=timezone, times=times)
+    if "times" in data:
+        raise ConfigError("schedule.times is no longer supported; use schedule.interval_minutes")
+    if "interval_minutes" not in data:
+        raise ConfigError("schedule.interval_minutes is required")
+
+    quiet_data = data.get("quiet_window")
+    if not isinstance(quiet_data, dict):
+        raise ConfigError("schedule.quiet_window is required")
+
+    quiet_start = str(quiet_data.get("start") or "").strip()
+    quiet_end = str(quiet_data.get("end") or "").strip()
+    quiet_start_minutes = _time_to_minutes(quiet_start)
+    quiet_end_minutes = _time_to_minutes(quiet_end)
+    if quiet_start_minutes == quiet_end_minutes:
+        raise ConfigError("schedule.quiet_window.start must not equal schedule.quiet_window.end")
+
+    return ScheduleConfig(
+        timezone=timezone,
+        interval_minutes=_positive_int(data.get("interval_minutes"), "schedule.interval_minutes"),
+        jitter_minutes=_nonnegative_int(data.get("jitter_minutes", 0), "schedule.jitter_minutes"),
+        quiet_window=QuietWindowConfig(start=quiet_start, end=quiet_end),
+    )
 
 
 def _parse_storage(data: dict) -> StorageConfig:
@@ -238,6 +264,16 @@ def _nonnegative_float(value: object, name: str) -> float:
     return parsed
 
 
+def _nonnegative_int(value: object, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+    if parsed < 0:
+        raise ConfigError(f"{name} must be greater than or equal to zero")
+    return parsed
+
+
 def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{name} must be a boolean")
@@ -250,3 +286,9 @@ def _validate_time(value: str) -> None:
     hour, minute = (int(part) for part in value.split(":", 1))
     if hour > 23 or minute > 59:
         raise ConfigError(f"schedule time is out of range: {value}")
+
+
+def _time_to_minutes(value: str) -> int:
+    _validate_time(value)
+    hour, minute = (int(part) for part in value.split(":", 1))
+    return hour * 60 + minute

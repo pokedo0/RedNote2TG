@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,15 +226,35 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(downloader.upload_live_photo)
             store.close()
 
-    def test_register_schedules_adds_one_job_per_time(self):
+    def test_register_schedules_adds_interval_jobs_outside_quiet_window(self):
         config = parse_config(base_config())
         scheduler = FakeScheduler()
         runner = SimpleNamespace(run_once=lambda: None)
 
         register_schedules(scheduler, config, runner)
 
-        self.assertEqual(len(scheduler.jobs), 2)
-        self.assertEqual(scheduler.jobs[0][2]["id"], "publish-09:00")
+        job_ids = [job[2]["id"] for job in scheduler.jobs]
+        self.assertEqual(len(scheduler.jobs), 18)
+        self.assertIn("publish-02:00", job_ids)
+        self.assertNotIn("publish-03:00", job_ids)
+        self.assertIn("publish-09:00", job_ids)
+        self.assertEqual(scheduler.jobs[0][2]["jitter"], 600)
+
+    def test_register_schedules_skips_jobs_that_jitter_into_quiet_window(self):
+        data = base_config()
+        data["schedule"]["interval_minutes"] = 5
+        data["schedule"]["jitter_minutes"] = 10
+        config = parse_config(data)
+        scheduler = FakeScheduler()
+        runner = SimpleNamespace(run_once=lambda: None)
+
+        register_schedules(scheduler, config, runner)
+
+        job_ids = [job[2]["id"] for job in scheduler.jobs]
+        self.assertIn("publish-02:45", job_ids)
+        self.assertNotIn("publish-02:50", job_ids)
+        self.assertNotIn("publish-02:55", job_ids)
+        self.assertIn("publish-09:00", job_ids)
 
     def test_authorization(self):
         self.assertTrue(is_authorized(1, (1, 2)))
@@ -309,9 +330,15 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             message = FakeMessage(1)
             scheduler = FakeScheduler()
 
-            await handle_status(message, store, scheduler, ())
+            scheduler.jobs = [
+                SimpleNamespace(next_run_time=datetime(2026, 7, 4, 1, 0, tzinfo=UTC)),
+            ]
+
+            await handle_status(message, store, scheduler, (), config)
 
             self.assertIn("status:", message.answers[0])
+            self.assertIn("next_run=2026-07-04 09:00:00", message.answers[0])
+            self.assertIn("schedule=interval interval=60m jitter=0-10m quiet=03:00-09:00", message.answers[0])
             store.close()
 
     def test_extract_xhs_url_from_command_text(self):

@@ -27,7 +27,12 @@ def base_config():
         },
         "publishing": {"notes_per_run": 3},
         "dedup": {"ttl_days": 14},
-        "schedule": {"timezone": "Asia/Shanghai", "times": ["09:00", "21:30"]},
+        "schedule": {
+            "timezone": "Asia/Shanghai",
+            "interval_minutes": 60,
+            "jitter_minutes": 10,
+            "quiet_window": {"start": "03:00", "end": "09:00"},
+        },
         "storage": {"sqlite_path": "data/test.db", "media_temp_dir": "data/tmp"},
     }
 
@@ -42,6 +47,10 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.publishing.notes_per_run, 3)
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 1.0)
         self.assertTrue(config.publishing.upload_live_photo)
+        self.assertEqual(config.schedule.interval_minutes, 60)
+        self.assertEqual(config.schedule.jitter_minutes, 10)
+        self.assertEqual(config.schedule.quiet_window.start, "03:00")
+        self.assertEqual(config.schedule.quiet_window.end, "09:00")
         self.assertFalse(config.debug.enabled)
 
     def test_parse_config_accepts_retry_after_padding(self):
@@ -130,7 +139,33 @@ class ConfigModelsTest(unittest.TestCase):
 
     def test_rejects_bad_schedule_time(self):
         data = base_config()
-        data["schedule"]["times"] = ["24:00"]
+        data["schedule"]["quiet_window"]["start"] = "24:00"
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_rejects_old_schedule_times(self):
+        data = base_config()
+        data["schedule"]["times"] = ["09:00"]
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_rejects_bad_interval_schedule_values(self):
+        invalid_configs = [
+            ("interval_minutes", 0),
+            ("jitter_minutes", -1),
+        ]
+        for key, value in invalid_configs:
+            data = base_config()
+            data["schedule"][key] = value
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    parse_config(data)
+
+    def test_rejects_equal_quiet_window_bounds(self):
+        data = base_config()
+        data["schedule"]["quiet_window"] = {"start": "03:00", "end": "03:00"}
 
         with self.assertRaises(ConfigError):
             parse_config(data)
