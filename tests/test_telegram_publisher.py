@@ -117,6 +117,20 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, PublishStatus.SENT)
         self.assertEqual(bot.calls[0][0], "photo")
 
+    async def test_publish_note_can_override_target_chat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.jpg"
+            path.write_bytes(b"x")
+            media = [DownloadedMedia(MediaItem("https://x/a.jpg", MediaType.IMAGE), path, 1)]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@channel")
+
+            result = await publisher.publish_note(sample_note(), media, chat_id=12345)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "photo")
+        self.assertEqual(bot.calls[0][1], 12345)
+
     async def test_single_live_photo_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             photo = Path(tmp) / "a.jpg"

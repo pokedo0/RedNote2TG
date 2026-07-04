@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from tests.test_config_models import base_config
 from rednote2tg.config import parse_config
 from rednote2tg.db import NoteStore
-from rednote2tg.models import Note, PublishResult, PublishStatus, SourceRef
+from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, PublishResult, PublishStatus, SourceRef
 from rednote2tg.scheduler import (
     PublishJobRunner,
     extract_xhs_url,
@@ -38,10 +38,11 @@ class FakeDownloader:
     def __init__(self):
         self.cleaned = False
         self.upload_live_photo = None
+        self.downloads = []
 
     async def download_all(self, note_id, media, upload_live_photo=True):
         self.upload_live_photo = upload_live_photo
-        return []
+        return self.downloads
 
     def cleanup(self):
         self.cleaned = True
@@ -51,8 +52,10 @@ class FakePublisher:
     def __init__(self):
         self.debug_messages = []
         self.telegram_retry_after_count = 0
+        self.published = []
 
-    async def publish_note(self, note, media):
+    async def publish_note(self, note, media, chat_id=None):
+        self.published.append((note, media, chat_id))
         return PublishResult(PublishStatus.SENT_DEGRADED, (100,))
 
     async def send_debug_message(self, text):
@@ -83,7 +86,7 @@ class FakeMessage:
     def __init__(self, user_id, text="", chat_type="private"):
         self.from_user = SimpleNamespace(id=user_id)
         self.text = text
-        self.chat = SimpleNamespace(type=chat_type)
+        self.chat = SimpleNamespace(id=user_id, type=chat_type)
         self.answers = []
         self.answer_kwargs = []
 
@@ -329,11 +332,18 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             description="正文",
             author="作者",
             source=SourceRef("manual", "url"),
+            media=(MediaItem("https://img/1.jpg", MediaType.IMAGE),),
         )
         source = FakeSource([fetched_note])
         with tempfile.TemporaryDirectory() as tmp:
             store = NoteStore(Path(tmp) / "db.sqlite")
-            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            downloader = FakeDownloader()
+            media_path = Path(tmp) / "downloaded.jpg"
+            media_path.write_bytes(b"x")
+            downloaded_media = DownloadedMedia(fetched_note.media[0], media_path, 1)
+            downloader.downloads = [downloaded_media]
+            publisher = FakePublisher()
+            runner = PublishJobRunner(config, source, store, downloader, publisher)
             message = FakeMessage(
                 1,
                 "/note https://www.xiaohongshu.com/explore/n1?xsec_token=abc",
@@ -343,9 +353,10 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await handle_fetch_note(message, runner, ())
 
             self.assertEqual(source.fetched_urls, ["https://www.xiaohongshu.com/explore/n1?xsec_token=abc"])
-            self.assertIn("<b>标题</b>", message.answers[0])
-            self.assertIn("正文", message.answers[0])
-            self.assertEqual(message.answer_kwargs[0], {"parse_mode": "HTML"})
+            self.assertTrue(downloader.cleaned)
+            self.assertEqual(downloader.upload_live_photo, config.publishing.upload_live_photo)
+            self.assertEqual(publisher.published, [(fetched_note, [downloaded_media], 1)])
+            self.assertEqual(message.answers, [])
             store.close()
 
     async def test_note_command_requires_private_chat(self):

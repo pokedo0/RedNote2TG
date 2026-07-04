@@ -40,18 +40,19 @@ class TelegramPublisher:
         self.retry_after_padding_seconds = retry_after_padding_seconds
         self.telegram_retry_after_count = 0
 
-    async def publish_note(self, note: Note, media: list[DownloadedMedia]) -> PublishResult:
+    async def publish_note(self, note: Note, media: list[DownloadedMedia], chat_id: str | int | None = None) -> PublishResult:
         caption = render_caption(note)
+        target_chat_id = chat_id if chat_id is not None else self.channel_id
         try:
             if not media:
                 msg = await self._send_with_retry(
                     self.bot.send_message,
-                    self.channel_id,
+                    target_chat_id,
                     caption,
                     parse_mode=self.parse_mode,
                 )
                 return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]))
-            messages = await self._send_media(media, caption)
+            messages = await self._send_media(media, caption, target_chat_id)
             return PublishResult(PublishStatus.SENT, _message_ids(messages))
         except TelegramRetryAfter as retry_exc:
             return PublishResult(PublishStatus.FAILED, error_message=str(retry_exc))
@@ -59,7 +60,7 @@ class TelegramPublisher:
             try:
                 msg = await self._send_with_retry(
                     self.bot.send_message,
-                    self.channel_id,
+                    target_chat_id,
                     caption,
                     parse_mode=self.parse_mode,
                 )
@@ -97,24 +98,24 @@ class TelegramPublisher:
             parse_mode=None,
         )
 
-    async def _send_media(self, media: list[DownloadedMedia], caption: str):
+    async def _send_media(self, media: list[DownloadedMedia], caption: str, chat_id: str | int):
         if len(media) == 1:
-            return [await self._send_single_media(media[0], caption)]
+            return [await self._send_single_media(media[0], caption, chat_id)]
 
         all_messages = []
         for index, chunk in enumerate(chunk_media(media, 10)):
             if index > 0:
                 await asyncio.sleep(1)
-            result = await self._send_media_chunk(chunk, caption if index == 0 else None)
+            result = await self._send_media_chunk(chunk, caption if index == 0 else None, chat_id)
             all_messages.extend(result or [])
         return all_messages
 
-    async def _send_single_media(self, item: DownloadedMedia, caption: str):
+    async def _send_single_media(self, item: DownloadedMedia, caption: str, chat_id: str | int):
         payload = _file_payload(item.path)
         if _can_send_live_photo(item):
             return await self._send_with_retry(
                 self.bot.send_live_photo,
-                self.channel_id,
+                chat_id,
                 _file_payload(item.live_video_path),
                 payload,
                 caption=caption,
@@ -123,13 +124,13 @@ class TelegramPublisher:
         send = self.bot.send_video if item.item.media_type is MediaType.VIDEO else self.bot.send_photo
         return await self._send_with_retry(
             send,
-            self.channel_id,
+            chat_id,
             payload,
             caption=caption,
             parse_mode=self.parse_mode,
         )
 
-    async def _send_media_chunk(self, chunk: list[DownloadedMedia], caption: str | None):
+    async def _send_media_chunk(self, chunk: list[DownloadedMedia], caption: str | None, chat_id: str | int):
         use_raw_group = _needs_raw_media_group(chunk)
         group = [
             _album_input_media(
@@ -143,9 +144,9 @@ class TelegramPublisher:
         if use_raw_group:
             return await self._send_with_retry(
                 self.bot.__call__,
-                RawSendMediaGroup(chat_id=self.channel_id, media=group),
+                RawSendMediaGroup(chat_id=str(chat_id), media=group),
             )
-        return await self._send_with_retry(self.bot.send_media_group, self.channel_id, group)
+        return await self._send_with_retry(self.bot.send_media_group, chat_id, group)
 
 
 def render_caption(note: Note) -> str:

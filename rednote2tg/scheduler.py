@@ -12,7 +12,7 @@ from rednote2tg.db import NoteStore
 from rednote2tg.keyword_rules import describe_note_time
 from rednote2tg.media import MediaDownloader
 from rednote2tg.models import PublishResult, PublishStatus
-from rednote2tg.telegram_publisher import TelegramPublisher, render_caption
+from rednote2tg.telegram_publisher import TelegramPublisher
 from rednote2tg.xhs_source import XhsSource
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,23 @@ async def handle_fetch_note(message, runner: PublishJobRunner, admin_user_ids: t
         await message.answer("未解析到笔记内容")
         return
 
-    await message.answer(render_caption(note), parse_mode=getattr(runner.publisher, "parse_mode", "HTML"))
+    chat_id = getattr(getattr(message, "chat", None), "id", None) or user_id
+    try:
+        downloads = await runner.downloader.download_all(
+            note.note_id,
+            note.media,
+            upload_live_photo=runner.config.publishing.upload_live_photo,
+        )
+        result = await runner.publisher.publish_note(note, downloads, chat_id=chat_id)
+    except Exception as exc:
+        logger.exception("manual note publish failed: %s", url)
+        await message.answer(f"发送失败：{exc}")
+        return
+    finally:
+        runner.downloader.cleanup()
+
+    if result.status is PublishStatus.FAILED:
+        await message.answer(f"发送失败：{result.error_message or 'unknown'}")
 
 
 def extract_xhs_url(text: str) -> str | None:
