@@ -64,7 +64,7 @@ class TelegramPublisher:
             messages = await self._send_media(media, caption, target_chat_id)
             return PublishResult(PublishStatus.SENT, _message_ids(messages))
         except TelegramRetryAfter as retry_exc:
-            return PublishResult(PublishStatus.FAILED, error_message=str(retry_exc))
+            return _retry_after_failure(retry_exc)
         except Exception as media_exc:
             try:
                 msg = await self._send_with_retry(
@@ -75,7 +75,7 @@ class TelegramPublisher:
                 )
                 return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]), str(media_exc))
             except TelegramRetryAfter as retry_exc:
-                return PublishResult(PublishStatus.FAILED, error_message=str(retry_exc))
+                return _retry_after_failure(retry_exc)
             except Exception as text_exc:
                 return PublishResult(PublishStatus.FAILED, error_message=str(text_exc))
 
@@ -191,6 +191,10 @@ def render_caption(note: Note) -> str:
         lines.append(counts)
     lines.append(f'<a href="{escape(note.url, quote=True)}">原文</a>')
     return "\n".join(lines)
+
+
+def _retry_after_failure(exc: TelegramRetryAfter) -> PublishResult:
+    return PublishResult(PublishStatus.FAILED, error_message=str(exc), retry_after_seconds=exc.retry_after)
 
 
 def chunk_media(media: list[DownloadedMedia], size: int = 10) -> list[list[DownloadedMedia]]:

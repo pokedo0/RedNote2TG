@@ -3,6 +3,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from tests.test_config_models import base_config
 from rednote2tg.config import parse_config
@@ -11,6 +12,7 @@ from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, Publi
 from rednote2tg.scheduler import (
     PublishJobRunner,
     extract_xhs_url,
+    format_run_once_summary,
     handle_fetch_note,
     handle_run_once,
     handle_status,
@@ -67,6 +69,7 @@ class SequencePublisher:
     def __init__(self, results):
         self.results = list(results)
         self.telegram_retry_after_count = 0
+        self.retry_after_padding_seconds = 0.0
 
     async def publish_note(self, note, media):
         return self.results.pop(0)
@@ -96,8 +99,9 @@ class FakeMessage:
         self.answer_kwargs.append(kwargs)
 
 
-def note(note_id):
-    return Note(note_id=note_id, url=f"https://xhs/{note_id}", title=note_id, source=SourceRef("keyword", "k"))
+def note(note_id, media_count=0):
+    media = tuple(MediaItem(f"https://img/{note_id}-{index}.jpg", MediaType.IMAGE) for index in range(media_count))
+    return Note(note_id=note_id, url=f"https://xhs/{note_id}", title=note_id, source=SourceRef("keyword", "k"), media=media)
 
 
 class SchedulerTest(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +123,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             second_result = await runner.run_once()
 
             self.assertEqual(result["published"], 1)
+            self.assertEqual(result["published_media"], 0)
             self.assertIn("elapsed_seconds", result)
             self.assertEqual(result["source_collected_notes"], 2)
             self.assertEqual(result["source_collected_errors"], 0)
@@ -126,8 +131,36 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["keyword_time_filter"], "-")
             self.assertEqual(result["telegram_retry_after_count"], 0)
             self.assertEqual(second_result["published"], 1)
+            self.assertEqual(second_result["published_media"], 0)
             self.assertTrue(store.is_active("n1"))
             self.assertTrue(store.is_active("n2"))
+            store.close()
+
+    async def test_runner_reports_published_and_failed_media_counts(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1", media_count=2), note("n2", media_count=3)]),
+                store,
+                FakeDownloader(),
+                SequencePublisher(
+                    [
+                        PublishResult(PublishStatus.SENT_DEGRADED, (101,)),
+                        PublishResult(PublishStatus.FAILED, error_message="bad"),
+                    ]
+                ),
+            )
+
+            result = await runner.run_once()
+
+            self.assertEqual(result["published"], 1)
+            self.assertEqual(result["published_media"], 2)
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["failed_media"], 3)
+            self.assertIn("published=1(media=2)", format_run_once_summary(result))
+            self.assertIn("failed=1(media=3)", format_run_once_summary(result))
             store.close()
 
     async def test_runner_reports_retry_after_count_delta(self):
@@ -212,6 +245,33 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(store.is_active("n1"))
             store.close()
 
+    async def test_runner_waits_retry_after_before_next_note_after_flood_failure(self):
+        config = parse_config(base_config())
+        publisher = SequencePublisher(
+            [
+                PublishResult(PublishStatus.FAILED, error_message="flood", retry_after_seconds=44),
+                PublishResult(PublishStatus.SENT_DEGRADED, (101,)),
+            ]
+        )
+        publisher.retry_after_padding_seconds = 1.0
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1"), note("n2")]),
+                store,
+                FakeDownloader(),
+                publisher,
+            )
+
+            with patch("rednote2tg.scheduler.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                result = await runner.run_once()
+
+            sleep.assert_awaited_once_with(45.0)
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["published"], 1)
+            store.close()
+
     async def test_runner_passes_live_photo_upload_config_to_downloader(self):
         data = base_config()
         data["publishing"]["upload_live_photo"] = False
@@ -277,7 +337,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(unauthorized.answers, ["unauthorized"])
             self.assertIn("run_once done", authorized.answers[0])
             self.assertIn("\n  source_collected notes=1 errors=0", authorized.answers[0])
-            self.assertIn("\n  publish published=1 skipped=0 failed=0 source_errors=0", authorized.answers[0])
+            self.assertIn("\n  publish published=1(media=0) skipped=0 failed=0(media=0) source_errors=0", authorized.answers[0])
             self.assertIn("elapsed=", authorized.answers[0])
             self.assertIn("keyword query=- time_filter=-", authorized.answers[0])
             self.assertNotIn("keyword_note_time", authorized.answers[0])

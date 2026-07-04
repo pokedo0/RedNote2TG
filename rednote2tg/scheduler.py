@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from time import perf_counter
@@ -42,8 +43,11 @@ class PublishJobRunner:
         notes, errors = self.source.collect()
         active_ids = self.store.active_note_ids()
         published = 0
+        published_media = 0
         skipped = 0
         failed = 0
+        failed_media = 0
+        pending_retry_after_seconds: float | None = None
 
         for note in notes:
             if published >= self.config.publishing.notes_per_run:
@@ -52,6 +56,17 @@ class PublishJobRunner:
                 skipped += 1
                 logger.info("note skipped: note_id=%s reason=active_dedup", note.note_id)
                 continue
+
+            if pending_retry_after_seconds is not None:
+                padding_seconds = getattr(self.publisher, "retry_after_padding_seconds", 0.0)
+                sleep_seconds = pending_retry_after_seconds + padding_seconds
+                logger.warning(
+                    "telegram retry-after cooldown before next note: retry_after=%s sleep_seconds=%s",
+                    pending_retry_after_seconds,
+                    sleep_seconds,
+                )
+                await asyncio.sleep(sleep_seconds)
+                pending_retry_after_seconds = None
 
             try:
                 logger.info(
@@ -76,6 +91,7 @@ class PublishJobRunner:
                 self.store.record_publish(note, result, self.config.dedup.ttl_days)
                 active_ids.add(note.note_id)
                 published += 1
+                published_media += len(note.media)
                 logger.info(
                     "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s",
                     note.note_id,
@@ -84,6 +100,8 @@ class PublishJobRunner:
                 )
             else:
                 failed += 1
+                failed_media += len(note.media)
+                pending_retry_after_seconds = result.retry_after_seconds
                 logger.warning(
                     "note upload finished: note_id=%s status=%s success=false reason=%s",
                     note.note_id,
@@ -98,8 +116,10 @@ class PublishJobRunner:
         keyword_query = getattr(self.source, "last_keyword_query", None)
         summary: dict[str, Any] = {
             "published": published,
+            "published_media": published_media,
             "skipped": skipped,
             "failed": failed,
+            "failed_media": failed_media,
             "source_errors": len(errors),
             "source_collected_notes": len(notes),
             "source_collected_errors": len(errors),
@@ -209,7 +229,8 @@ def format_run_once_summary(result: dict[str, Any]) -> str:
     return (
         "run_once done:\n"
         f"  source_collected notes={result['source_collected_notes']} errors={result['source_collected_errors']}\n"
-        f"  publish published={result['published']} skipped={result['skipped']} failed={result['failed']} "
+        f"  publish published={result['published']}(media={result.get('published_media', 0)}) "
+        f"skipped={result['skipped']} failed={result['failed']}(media={result.get('failed_media', 0)}) "
         f"source_errors={result['source_errors']}\n"
         f"  keyword query={result['keyword_query'] or '-'} time_filter={result['keyword_time_filter']}\n"
         f"  TelegramRetryAfter count={result.get('telegram_retry_after_count', 0)}\n"

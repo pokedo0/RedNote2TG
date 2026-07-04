@@ -71,6 +71,7 @@ class PublishResult:
     status: PublishStatus
     telegram_message_ids: tuple[int, ...] = ()
     error_message: str | None = None
+    retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True)

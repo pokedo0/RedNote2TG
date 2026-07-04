@@ -279,6 +279,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
                 result = await publisher.publish_note(sample_note(), media)
 
         self.assertEqual(result.status, PublishStatus.FAILED)
+        self.assertEqual(result.retry_after_seconds, 30)
         self.assertEqual(bot.group_attempts, 3)
         self.assertEqual(publisher.telegram_retry_after_count, 3)
         self.assertEqual(sleep.await_count, 2)
