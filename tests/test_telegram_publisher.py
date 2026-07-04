@@ -44,13 +44,13 @@ class FakeBot:
         self.calls.append(("live_photo", chat_id, live_photo, photo, caption, parse_mode))
         return self._msg()
 
-    async def send_media_group(self, chat_id, media):
+    async def send_media_group(self, chat_id, media, reply_to_message_id=None):
         self.group_attempts += 1
         if self.group_attempts <= self.retry_after_group_failures:
             raise retry_after_error(chat_id, 30)
         if self.fail_media:
             raise RuntimeError("group failed")
-        self.calls.append(("group", chat_id, media))
+        self.calls.append(("group", chat_id, media, reply_to_message_id))
         return [self._msg() for _ in media]
 
     def _msg(self):
@@ -92,6 +92,58 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("T &lt;1&gt;", caption)
         self.assertIn("D &amp; more", caption)
         self.assertIn('<a href="https://xhs/n1?x=&lt;bad&gt;">原文</a>', caption)
+        self.assertNotIn("作者：A", caption)
+        self.assertNotIn("时间：today", caption)
+        self.assertNotIn("IP：Shanghai", caption)
+
+    def test_caption_extracts_topics_into_bold_quote_block(self):
+        note = sample_note()
+        note = Note(
+            **{
+                **note.__dict__,
+                "description": (
+                    "薯丝高跟才是氛围天花板！\n"
+                    "\n"
+                    "💗穿着也很舒服 8厘米跟高一点不累脚\n"
+                    "#水钻高跟鞋[话题]##时尚尖头女鞋[话题]# #美鞋分享[话题]#"
+                ),
+            }
+        )
+
+        caption = render_caption(note)
+
+        self.assertIn("薯丝高跟才是氛围天花板！", caption)
+        self.assertIn("💗穿着也很舒服 8厘米跟高一点不累脚", caption)
+        self.assertNotIn("[话题]", caption)
+        self.assertIn("<blockquote><b>#水钻高跟鞋 #时尚尖头女鞋 #美鞋分享</b></blockquote>", caption)
+
+    def test_caption_limits_description_length_and_lines(self):
+        note = sample_note()
+        long_description = "\n".join(
+            [
+                "第一行",
+                "",
+                "第二行",
+                "第三行",
+                "第四行",
+                "第五行",
+                "第六行",
+                "第七行",
+            ]
+        )
+        note = Note(**{**note.__dict__, "description": long_description})
+
+        caption = render_caption(note)
+        description = caption.splitlines()[1]
+
+        self.assertEqual(description.count("\n"), 0)
+        self.assertEqual(caption.splitlines()[1:7], ["第一行", "第二行", "第三行", "第四行", "第五行", "第六行...."])
+
+        note = Note(**{**note.__dict__, "description": "长" * 205})
+        caption = render_caption(note)
+        description = caption.splitlines()[1]
+        self.assertEqual(len(description), 200)
+        self.assertTrue(description.endswith("...."))
 
     def test_chunk_media_uses_size_ten(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,7 +284,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleep.await_count, 2)
         self.assertFalse(any(call[0] == "message" for call in bot.calls))
 
-    async def test_multi_media_later_groups_have_no_caption(self):
+    async def test_multi_media_later_groups_have_no_caption_and_reply_to_previous_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             media = []
             for index in range(11):
@@ -252,9 +304,11 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         
         first_caption = first_group[0].caption if hasattr(first_group[0], "caption") else first_group[0].get("caption")
         second_caption = second_group[0].caption if hasattr(second_group[0], "caption") else second_group[0].get("caption")
-        
+
         self.assertIsNotNone(first_caption)
         self.assertIsNone(second_caption)
+        self.assertIsNone(bot.calls[0][3])
+        self.assertEqual(bot.calls[1][3], 10)
 
     async def test_mixed_live_photo_album_uses_raw_media_group(self):
         with tempfile.TemporaryDirectory() as tmp:

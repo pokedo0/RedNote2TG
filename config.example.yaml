@@ -21,7 +21,7 @@ sources:
     limit_per_category: 20
 
 publishing:
-  notes_per_run: 3
+  notes_per_run: 5
   media_strategy: "all"
   caption_parse_mode: "HTML"
   telegram_retry_after_padding_seconds: 1.0

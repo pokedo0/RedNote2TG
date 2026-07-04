@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from html import escape
 from pathlib import Path
 from typing import Any, ClassVar
@@ -16,12 +17,20 @@ from rednote2tg.models import DownloadedMedia, MediaType, Note, PublishResult, P
 logger = logging.getLogger(__name__)
 
 
+_DESCRIPTION_MAX_CHARS = 200
+_DESCRIPTION_MAX_LINES = 6
+_TRUNCATION_MARKER = "...."
+_TOPIC_PATTERN = re.compile(r"#([^#\[\]\r\n]+?)\[话题\]#")
+_INLINE_SPACE_PATTERN = re.compile(r"[ \t\f\v]+")
+
+
 class RawSendMediaGroup(TelegramMethod[list[Message]]):
     __returning__: ClassVar[Any] = list[Message]
     __api_method__: ClassVar[str] = "sendMediaGroup"
 
     chat_id: str
     media: list[dict[str, Any]]
+    reply_to_message_id: int | None = None
 
 
 class TelegramPublisher:
@@ -103,11 +112,19 @@ class TelegramPublisher:
             return [await self._send_single_media(media[0], caption, chat_id)]
 
         all_messages = []
+        reply_to_message_id = None
         for index, chunk in enumerate(chunk_media(media, 10)):
             if index > 0:
                 await asyncio.sleep(1)
-            result = await self._send_media_chunk(chunk, caption if index == 0 else None, chat_id)
+            result = await self._send_media_chunk(
+                chunk,
+                caption if index == 0 else None,
+                chat_id,
+                reply_to_message_id,
+            )
             all_messages.extend(result or [])
+            if result:
+                reply_to_message_id = getattr(result[-1], "message_id", None)
         return all_messages
 
     async def _send_single_media(self, item: DownloadedMedia, caption: str, chat_id: str | int):
@@ -130,7 +147,13 @@ class TelegramPublisher:
             parse_mode=self.parse_mode,
         )
 
-    async def _send_media_chunk(self, chunk: list[DownloadedMedia], caption: str | None, chat_id: str | int):
+    async def _send_media_chunk(
+        self,
+        chunk: list[DownloadedMedia],
+        caption: str | None,
+        chat_id: str | int,
+        reply_to_message_id: int | None = None,
+    ):
         use_raw_group = _needs_raw_media_group(chunk)
         group = [
             _album_input_media(
@@ -144,31 +167,73 @@ class TelegramPublisher:
         if use_raw_group:
             return await self._send_with_retry(
                 self.bot.__call__,
-                RawSendMediaGroup(chat_id=str(chat_id), media=group),
+                RawSendMediaGroup(chat_id=str(chat_id), media=group, reply_to_message_id=reply_to_message_id),
             )
-        return await self._send_with_retry(self.bot.send_media_group, chat_id, group)
+        return await self._send_with_retry(
+            self.bot.send_media_group,
+            chat_id,
+            group,
+            reply_to_message_id=reply_to_message_id,
+        )
 
 
 def render_caption(note: Note) -> str:
+    description, topics = _format_description_and_topics(note.description)
     lines = [
         f"<b>{escape(note.display_title)}</b>",
     ]
-    if note.description:
-        lines.append(escape(note.description))
-    if note.author:
-        lines.append(f"作者：{escape(note.author)}")
+    if description:
+        lines.append(escape(description))
+    if topics:
+        lines.append(_topics_block(topics))
     counts = _counts_line(note)
     if counts:
         lines.append(counts)
-    metadata = _metadata_line(note)
-    if metadata:
-        lines.append(metadata)
     lines.append(f'<a href="{escape(note.url, quote=True)}">原文</a>')
     return "\n".join(lines)
 
 
 def chunk_media(media: list[DownloadedMedia], size: int = 10) -> list[list[DownloadedMedia]]:
     return [media[index:index + size] for index in range(0, len(media), size)]
+
+
+def _format_description_and_topics(description: str) -> tuple[str, list[str]]:
+    topics: list[str] = []
+
+    def collect_topic(match: re.Match[str]) -> str:
+        topic = match.group(1).strip()
+        if topic:
+            topics.append(f"#{topic}")
+        return " "
+
+    description_without_topics = _TOPIC_PATTERN.sub(collect_topic, description)
+    return _truncate_description(_clean_description(description_without_topics)), topics
+
+
+def _clean_description(description: str) -> str:
+    lines = []
+    for raw_line in description.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = _INLINE_SPACE_PATTERN.sub(" ", raw_line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _truncate_description(description: str) -> str:
+    lines = description.splitlines()
+    truncated = len(lines) > _DESCRIPTION_MAX_LINES
+    text = "\n".join(lines[:_DESCRIPTION_MAX_LINES])
+    if len(text) > _DESCRIPTION_MAX_CHARS:
+        text = text[: _DESCRIPTION_MAX_CHARS - len(_TRUNCATION_MARKER)].rstrip()
+        truncated = True
+    if truncated:
+        text = text[: _DESCRIPTION_MAX_CHARS - len(_TRUNCATION_MARKER)].rstrip()
+        return f"{text}{_TRUNCATION_MARKER}"
+    return text
+
+
+def _topics_block(topics: list[str]) -> str:
+    return f"<blockquote><b>{escape(' '.join(topics))}</b></blockquote>"
 
 
 def _counts_line(note: Note) -> str:
@@ -181,15 +246,6 @@ def _counts_line(note: Note) -> str:
         parts.append(f"评 {escape(str(note.comment_count))}")
     if note.share_count is not None:
         parts.append(f"转 {escape(str(note.share_count))}")
-    return " / ".join(parts)
-
-
-def _metadata_line(note: Note) -> str:
-    parts = []
-    if note.upload_time is not None:
-        parts.append(f"时间：{escape(str(note.upload_time))}")
-    if note.ip_location:
-        parts.append(f"IP：{escape(note.ip_location)}")
     return " / ".join(parts)
 
 
