@@ -11,6 +11,7 @@ from rednote2tg.db import NoteStore
 from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, PublishResult, PublishStatus, SourceRef
 from rednote2tg.scheduler import (
     PublishJobRunner,
+    SourceErrorAutoPause,
     extract_xhs_url,
     format_run_once_summary,
     handle_fetch_note,
@@ -78,12 +79,32 @@ class SequencePublisher:
 class FakeScheduler:
     def __init__(self):
         self.jobs = []
+        self.paused = False
+        self.state = 1
 
     def add_job(self, func, trigger, **kwargs):
         self.jobs.append((func, trigger, kwargs))
 
     def get_jobs(self):
         return self.jobs
+
+    def pause(self):
+        self.paused = True
+        self.state = 2
+
+    def resume(self):
+        self.paused = False
+        self.state = 1
+
+
+class SummaryRunner:
+    def __init__(self, summaries, config=None, publisher=None):
+        self.summaries = list(summaries)
+        self.config = config
+        self.publisher = publisher
+
+    async def run_once(self):
+        return self.summaries.pop(0)
 
 
 class FakeMessage:
@@ -316,6 +337,91 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("publish-02:55", job_ids)
         self.assertIn("publish-09:00", job_ids)
 
+    async def test_source_error_auto_pause_pauses_after_three_consecutive_source_errors(self):
+        scheduler = FakeScheduler()
+        runner = SummaryRunner(
+            [
+                {"source_errors": 1},
+                {"source_errors": 1},
+                {"source_errors": 1},
+            ]
+        )
+        guard = SourceErrorAutoPause(runner, scheduler)
+
+        await guard.run_once()
+        await guard.run_once()
+        self.assertFalse(scheduler.paused)
+        await guard.run_once()
+
+        self.assertTrue(scheduler.paused)
+
+    async def test_source_error_auto_pause_resets_after_successful_collect(self):
+        scheduler = FakeScheduler()
+        runner = SummaryRunner(
+            [
+                {"source_errors": 1},
+                {"source_errors": 1},
+                {"source_errors": 0},
+                {"source_errors": 1},
+            ]
+        )
+        guard = SourceErrorAutoPause(runner, scheduler)
+
+        await guard.run_once()
+        await guard.run_once()
+        await guard.run_once()
+        await guard.run_once()
+
+        self.assertFalse(scheduler.paused)
+
+    async def test_source_error_auto_pause_sends_debug_notification_when_enabled(self):
+        data = base_config()
+        data["debug"] = {"enabled": True}
+        config = parse_config(data)
+        publisher = FakePublisher()
+        scheduler = FakeScheduler()
+        runner = SummaryRunner(
+            [
+                {"source_errors": 1},
+                {"source_errors": 1},
+                {"source_errors": 1},
+            ],
+            config=config,
+            publisher=publisher,
+        )
+        guard = SourceErrorAutoPause(runner, scheduler)
+
+        await guard.run_once()
+        await guard.run_once()
+        await guard.run_once()
+
+        self.assertTrue(scheduler.paused)
+        self.assertEqual(len(publisher.debug_messages), 1)
+        self.assertIn("定时爬取任务已自动暂停", publisher.debug_messages[0])
+        self.assertIn("/start_tasks", publisher.debug_messages[0])
+
+    async def test_source_error_auto_pause_skips_debug_notification_when_disabled(self):
+        config = parse_config(base_config())
+        publisher = FakePublisher()
+        scheduler = FakeScheduler()
+        runner = SummaryRunner(
+            [
+                {"source_errors": 1},
+                {"source_errors": 1},
+                {"source_errors": 1},
+            ],
+            config=config,
+            publisher=publisher,
+        )
+        guard = SourceErrorAutoPause(runner, scheduler)
+
+        await guard.run_once()
+        await guard.run_once()
+        await guard.run_once()
+
+        self.assertTrue(scheduler.paused)
+        self.assertEqual(publisher.debug_messages, [])
+
     def test_authorization(self):
         self.assertTrue(is_authorized(1, (1, 2)))
         self.assertFalse(is_authorized(3, (1, 2)))
@@ -397,8 +503,33 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await handle_status(message, store, scheduler, (), config)
 
             self.assertIn("status:", message.answers[0])
+            self.assertIn("crawl=running", message.answers[0])
             self.assertIn("next_run=2026-07-04 09:00:00", message.answers[0])
             self.assertIn("schedule=interval interval=60m jitter=0-10m quiet=03:00-09:00", message.answers[0])
+            store.close()
+
+    async def test_status_command_reports_paused_crawl_status(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            message = FakeMessage(1)
+            scheduler = FakeScheduler()
+            scheduler.pause()
+
+            await handle_status(message, store, scheduler, (), config)
+
+            self.assertIn("crawl=paused", message.answers[0])
+            store.close()
+
+    async def test_status_command_reports_unconfigured_crawl_status(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            message = FakeMessage(1)
+
+            await handle_status(message, store, None, (), config)
+
+            self.assertIn("crawl=unconfigured", message.answers[0])
             store.close()
 
     def test_extract_xhs_url_from_command_text(self):

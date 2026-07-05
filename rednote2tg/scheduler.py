@@ -18,6 +18,7 @@ from rednote2tg.xhs_source import XhsSource
 
 logger = logging.getLogger(__name__)
 XHS_URL_PATTERN = re.compile(r"https?://[^\s<>]*xiaohongshu\.com/[^\s<>]+")
+SOURCE_ERROR_AUTO_PAUSE_THRESHOLD = 3
 
 
 class PublishJobRunner:
@@ -150,11 +151,56 @@ def create_scheduler(config: AppConfig, runner: PublishJobRunner):
     return scheduler
 
 
+class SourceErrorAutoPause:
+    def __init__(self, runner: PublishJobRunner, scheduler, threshold: int = SOURCE_ERROR_AUTO_PAUSE_THRESHOLD):
+        self.runner = runner
+        self.scheduler = scheduler
+        self.threshold = threshold
+        self.consecutive_source_error_runs = 0
+
+    async def run_once(self) -> dict[str, Any]:
+        summary = await self.runner.run_once()
+        if summary.get("source_errors", 0) > 0:
+            self.consecutive_source_error_runs += 1
+            logger.warning(
+                "source error streak: count=%d threshold=%d",
+                self.consecutive_source_error_runs,
+                self.threshold,
+            )
+        else:
+            self.consecutive_source_error_runs = 0
+
+        if self.consecutive_source_error_runs >= self.threshold:
+            self.scheduler.pause()
+            logger.error(
+                "scheduled crawl tasks paused after consecutive source errors: threshold=%d",
+                self.threshold,
+            )
+            await self._send_debug_pause_message()
+            self.consecutive_source_error_runs = 0
+        return summary
+
+    async def _send_debug_pause_message(self) -> None:
+        config = getattr(self.runner, "config", None)
+        if not getattr(getattr(config, "debug", None), "enabled", False):
+            return
+        publisher = getattr(self.runner, "publisher", None)
+        if publisher is None:
+            return
+        try:
+            await publisher.send_debug_message(
+                f"定时爬取任务已自动暂停：连续 {self.threshold} 次爬取异常，请检查小红书登录状态后使用 /start_tasks 恢复。"
+            )
+        except Exception:
+            logger.exception("debug auto-pause notification send failed")
+
+
 def register_schedules(scheduler, config: AppConfig, runner: PublishJobRunner) -> None:
     timezone = ZoneInfo(config.schedule.timezone)
     quiet_start = _time_to_minutes(config.schedule.quiet_window.start)
     quiet_end = _time_to_minutes(config.schedule.quiet_window.end)
     jitter_seconds = config.schedule.jitter_minutes * 60
+    guarded_runner = SourceErrorAutoPause(runner, scheduler)
     for minute_of_day in _scheduled_minutes(
         config.schedule.interval_minutes,
         config.schedule.jitter_minutes,
@@ -164,7 +210,7 @@ def register_schedules(scheduler, config: AppConfig, runner: PublishJobRunner) -
         hour, minute = divmod(minute_of_day, 60)
         time_value = f"{hour:02d}:{minute:02d}"
         scheduler.add_job(
-            runner.run_once,
+            guarded_runner.run_once,
             "cron",
             hour=hour,
             minute=minute,
@@ -254,7 +300,7 @@ async def handle_status(
     timezone = ZoneInfo(config.schedule.timezone) if config is not None else UTC
     await message.answer(
         "status: "
-        f"jobs={len(jobs)} next_run={_format_next_run(jobs, timezone)} "
+        f"crawl={_format_crawl_status(scheduler)} jobs={len(jobs)} next_run={_format_next_run(jobs, timezone)} "
         f"{_format_schedule_status(config)} active_dedup={summary.active_dedup_count} "
         f"sent={summary.recent_sent_count} failed={summary.recent_failed_count}"
     )
@@ -266,6 +312,23 @@ def _format_next_run(jobs, timezone) -> str:
     if not next_runs:
         return "-"
     return min(next_runs).astimezone(timezone).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _format_crawl_status(scheduler) -> str:
+    if scheduler is None:
+        return "unconfigured"
+    if getattr(scheduler, "paused", False):
+        return "paused"
+    state = getattr(scheduler, "state", None)
+    if state == 2:
+        return "paused"
+    if state == 1:
+        return "running"
+    if state == 0:
+        return "stopped"
+    if getattr(scheduler, "running", False):
+        return "running"
+    return "unknown"
 
 
 def _format_schedule_status(config: AppConfig | None) -> str:
