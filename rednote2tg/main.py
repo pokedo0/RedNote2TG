@@ -30,7 +30,7 @@ async def async_main(config_path: str = "config.yaml") -> None:
     )
     runner = PublishJobRunner(config, source, store, downloader, publisher)
     scheduler = create_scheduler(config, runner)
-    register_handlers(dispatcher, runner, store, scheduler, config.telegram.admin_user_ids)
+    register_handlers(dispatcher, runner, store, scheduler, config.telegram.admin_user_ids, config_path)
 
     scheduler.start()
     from aiogram.types import BotCommand
@@ -39,7 +39,8 @@ async def async_main(config_path: str = "config.yaml") -> None:
         BotCommand(command="status", description="查看当前系统运行状态"),
         BotCommand(command="start_tasks", description="开始定时爬取任务"),
         BotCommand(command="stop_tasks", description="停止定时爬取任务"),
-        BotCommand(command="note", description="私聊抓取一个小红书笔记链接")
+        BotCommand(command="note", description="私聊抓取一个小红书笔记链接"),
+        BotCommand(command="update_cookie", description="更新小红书Cookie"),
     ])
     try:
         await dispatcher.start_polling(bot)

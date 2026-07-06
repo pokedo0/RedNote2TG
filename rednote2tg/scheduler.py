@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 from time import perf_counter
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from rednote2tg.config import AppConfig
+import yaml
+
+from rednote2tg.config import AppConfig, XhsConfig
 from rednote2tg.db import NoteStore
 from rednote2tg.keyword_rules import describe_note_time
 from rednote2tg.media import MediaDownloader
@@ -418,7 +421,64 @@ def extract_xhs_url(text: str) -> str | None:
     return match.group(0).rstrip(".,;，。；")
 
 
-def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, scheduler, admin_user_ids: tuple[int, ...]) -> None:
+async def handle_update_cookie(
+    message,
+    runner: PublishJobRunner,
+    admin_user_ids: tuple[int, ...],
+    config_path: str,
+) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, admin_user_ids):
+        await message.answer("unauthorized")
+        return
+
+    text = (getattr(message, "text", "") or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "用法：/update_cookie <cookie字符串>\n"
+            "示例：/update_cookie loadts=xxx;xsecappid=xhs-pc-web;acw_tc=xxx"
+        )
+        return
+
+    new_cookie = parts[1].strip()
+
+    # Update config.yaml — preserve comments and formatting
+    try:
+        config_file = Path(config_path)
+        content = config_file.read_text(encoding="utf-8")
+        data = yaml.safe_load(content) or {}
+        old_cookie = (data.get("xhs") or {}).get("cookies", "")
+
+        if old_cookie and old_cookie in content:
+            new_content = content.replace(old_cookie, new_cookie, 1)
+        else:
+            new_content = re.sub(
+                r'(cookies:\s*)(".*?"|\S[^\n]*)',
+                lambda m: m.group(1) + '"' + new_cookie + '"',
+                content,
+                count=1,
+            )
+        config_file.write_text(new_content, encoding="utf-8")
+    except Exception as exc:
+        logger.exception("failed to update config file with new cookie")
+        await message.answer(f"❌ 配置文件更新失败：{exc}")
+        return
+
+    # Rebuild XHS client with new cookie
+    try:
+        new_xhs_config = XhsConfig(cookies=new_cookie, proxies=runner.config.xhs.proxies)
+        runner.source.client = XhsSource._create_client(new_xhs_config)
+    except Exception as exc:
+        logger.exception("failed to rebuild XHS client with new cookie")
+        await message.answer(f"⚠️ Cookie 已写入配置文件，但客户端重建失败：{exc}")
+        return
+
+    logger.info("cookie updated successfully via bot command")
+    await message.answer("✅ Cookie 已更新并生效")
+
+
+def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, scheduler, admin_user_ids: tuple[int, ...], config_path: str = "config.yaml") -> None:
     try:
         from aiogram.filters import Command
     except Exception as exc:  # pragma: no cover - runtime dependency guard.
@@ -443,3 +503,7 @@ def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, sc
     @dispatcher.message(Command("note"))
     async def _note(message):
         await handle_fetch_note(message, runner, admin_user_ids)
+
+    @dispatcher.message(Command("update_cookie"))
+    async def _update_cookie(message):
+        await handle_update_cookie(message, runner, admin_user_ids, config_path)
