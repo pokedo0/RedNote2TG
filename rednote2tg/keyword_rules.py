@@ -32,6 +32,7 @@ class OptionalGroup:
     name: str
     weight: float
     pools: tuple[tuple[str, ...], ...]
+    max_total_length: int | None = None
 
 
 NOTE_TIME_VALUES = {
@@ -80,7 +81,7 @@ def parse_keyword_rules(data: Mapping[str, Any]) -> KeywordRules:
     if min(length_weights) < len(required_pools):
         raise KeywordRuleError("length_weights minimum is smaller than required_pools count")
 
-    optional_groups = _parse_optional_groups(data.get("optional_groups"))
+    optional_groups = _parse_optional_groups(data.get("optional_groups"), len(required_pools))
     _validate_weight_sum({group.name: group.weight for group in optional_groups}, "optional_groups weights")
 
     time_weights = _parse_str_weights(data.get("time_weights"), "time_weights")
@@ -101,9 +102,11 @@ def generate_keyword_query(rules: KeywordRules, rng: random.Random | None = None
     rng = rng or random.Random()
     target_length = _weighted_choice(rules.length_weights, rng)
     selected_terms: list[str] = []
+    selected_groups: list[OptionalGroup | None] = []
 
     for pool in rules.required_pools:
         selected_terms.append(_choose_term(pool, set(selected_terms), rng))
+        selected_groups.append(None)
 
     used_pools: set[tuple[str, int]] = set()
     while len(selected_terms) < target_length:
@@ -121,8 +124,10 @@ def generate_keyword_query(rules: KeywordRules, rng: random.Random | None = None
         pool_index = rng.choice(pool_indexes)
         pool = group.pools[pool_index]
         selected_terms.append(_choose_term(pool, selected_set, rng))
+        selected_groups.append(group)
         used_pools.add((group.name, pool_index))
 
+    selected_terms = _apply_max_total_length_constraints(selected_terms, selected_groups, len(rules.required_pools))
     time_key = _weighted_choice(rules.time_weights, rng)
     return KeywordQuery(rules.joiner.join(selected_terms), NOTE_TIME_VALUES[time_key])
 
@@ -133,7 +138,7 @@ def describe_note_time(note_time: int | None) -> str:
     return NOTE_TIME_LABELS.get(note_time, f"未知({note_time})")
 
 
-def _parse_optional_groups(value: object) -> tuple[OptionalGroup, ...]:
+def _parse_optional_groups(value: object, required_pool_count: int) -> tuple[OptionalGroup, ...]:
     if not isinstance(value, dict) or not value:
         raise KeywordRuleError("optional_groups must be a non-empty mapping")
 
@@ -142,6 +147,11 @@ def _parse_optional_groups(value: object) -> tuple[OptionalGroup, ...]:
         if not isinstance(raw_group, dict):
             raise KeywordRuleError(f"optional_groups.{name} must be a mapping")
         weight = _parse_weight(raw_group.get("weight"), f"optional_groups.{name}.weight")
+        max_total_length = _parse_max_total_length(
+            raw_group.get("max_total_length"),
+            f"optional_groups.{name}.max_total_length",
+            required_pool_count,
+        )
         raw_pools = _require_sequence(raw_group.get("pools"), f"optional_groups.{name}.pools")
         pools = tuple(
             _parse_term_pool(pool, f"optional_groups.{name}.pools[{index}]")
@@ -149,8 +159,56 @@ def _parse_optional_groups(value: object) -> tuple[OptionalGroup, ...]:
         )
         if not pools:
             raise KeywordRuleError(f"optional_groups.{name}.pools must contain at least one pool")
-        groups.append(OptionalGroup(str(name), weight, pools))
+        groups.append(OptionalGroup(str(name), weight, pools, max_total_length))
     return tuple(groups)
+
+
+def _parse_max_total_length(value: object, name: str, required_pool_count: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise KeywordRuleError(f"{name} must be an integer")
+    if value <= required_pool_count:
+        raise KeywordRuleError(f"{name} must be greater than required_pools count")
+    return value
+
+
+def _apply_max_total_length_constraints(
+    selected_terms: list[str],
+    selected_groups: list[OptionalGroup | None],
+    required_count: int,
+) -> list[str]:
+    max_lengths = [
+        group.max_total_length
+        for group in selected_groups[required_count:]
+        if group is not None and group.max_total_length is not None
+    ]
+    if not max_lengths:
+        return selected_terms
+
+    max_total_length = min(max_lengths)
+    if len(selected_terms) <= max_total_length:
+        return selected_terms
+
+    constrained_indexes = {
+        index
+        for index, group in enumerate(selected_groups)
+        if index >= required_count and group is not None and group.max_total_length is not None
+    }
+    if required_count + len(constrained_indexes) > max_total_length:
+        raise KeywordRuleError("keyword rules max_total_length cannot retain required and constrained terms")
+
+    trimmed_terms = selected_terms[:required_count]
+    for index in range(required_count, len(selected_terms)):
+        if index in constrained_indexes:
+            trimmed_terms.append(selected_terms[index])
+            continue
+
+        remaining_constrained_count = sum(1 for constrained_index in constrained_indexes if constrained_index > index)
+        if len(trimmed_terms) + remaining_constrained_count < max_total_length:
+            trimmed_terms.append(selected_terms[index])
+
+    return trimmed_terms
 
 
 def _parse_int_weights(value: object, name: str) -> dict[int, float]:

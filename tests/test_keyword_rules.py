@@ -20,6 +20,17 @@ def base_rules():
     }
 
 
+class FakeRandom:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def random(self):
+        return next(self.values)
+
+    def choice(self, values):
+        return values[0]
+
+
 class KeywordRulesTest(unittest.TestCase):
     def test_loads_rules_and_generates_query(self):
         rules = parse_keyword_rules(base_rules())
@@ -114,6 +125,42 @@ time_weights:
 
         self.assertEqual(len(query.query.split(" ")), 5)
         self.assertEqual(query.note_time, 2)
+
+    def test_max_total_length_keeps_late_brand_and_trims_other_optional_terms(self):
+        data = {
+            "joiner": " ",
+            "length_weights": {6: 1.0},
+            "required_pools": [["高跟"], ["水晶"]],
+            "optional_groups": {
+                "attributes": {
+                    "weight": 0.5,
+                    "pools": ["白色", "粗跟"],
+                },
+                "long_tail": {
+                    "weight": 0.4,
+                    "pools": ["夏日"],
+                },
+                "brands": {
+                    "weight": 0.1,
+                    "max_total_length": 4,
+                    "pools": ["zara"],
+                },
+            },
+            "time_weights": {"unlimited": 1.0},
+        }
+        rules = parse_keyword_rules(data)
+        rng = FakeRandom([0.0, 0.1, 0.1, 0.6, 0.95, 0.0])
+
+        query = generate_keyword_query(rules, rng)
+
+        self.assertEqual(query.query, "高跟 水晶 白色 zara")
+
+    def test_rejects_max_total_length_that_cannot_keep_required_and_group_term(self):
+        data = base_rules()
+        data["optional_groups"]["attributes"]["max_total_length"] = 2
+
+        with self.assertRaises(KeywordRuleError):
+            parse_keyword_rules(data)
 
     def test_raises_when_target_length_cannot_be_filled(self):
         data = base_rules()
