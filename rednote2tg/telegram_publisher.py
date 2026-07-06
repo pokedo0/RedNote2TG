@@ -138,9 +138,17 @@ class TelegramPublisher:
                 caption=caption,
                 parse_mode=self.parse_mode,
             )
-        send = self.bot.send_video if item.item.media_type is MediaType.VIDEO else self.bot.send_photo
+        if item.item.media_type is MediaType.VIDEO:
+            return await self._send_with_retry(
+                self.bot.send_video,
+                chat_id,
+                payload,
+                caption=caption,
+                parse_mode=self.parse_mode,
+                supports_streaming=True,
+            )
         return await self._send_with_retry(
-            send,
+            self.bot.send_photo,
             chat_id,
             payload,
             caption=caption,
@@ -268,15 +276,24 @@ def _input_media(item: DownloadedMedia, caption: str | None, parse_mode: str):
         from aiogram.types import InputMediaPhoto, InputMediaVideo
 
         if item.item.media_type is MediaType.VIDEO:
-            return InputMediaVideo(media=payload, caption=caption, parse_mode=parse_mode if caption else None)
+            return InputMediaVideo(
+                media=payload,
+                caption=caption,
+                parse_mode=parse_mode if caption else None,
+                supports_streaming=True,
+            )
         return InputMediaPhoto(media=payload, caption=caption, parse_mode=parse_mode if caption else None)
     except Exception:
-        return {
-            "type": "video" if item.item.media_type is MediaType.VIDEO else "photo",
+        media_type = "video" if item.item.media_type is MediaType.VIDEO else "photo"
+        media: dict[str, Any] = {
+            "type": media_type,
             "media": payload,
             "caption": caption,
             "parse_mode": parse_mode if caption else None,
         }
+        if media_type == "video":
+            media["supports_streaming"] = True
+        return media
 
 
 def _album_input_media(
@@ -299,12 +316,16 @@ def _raw_input_media(item: DownloadedMedia, caption: str | None, parse_mode: str
             "caption": caption,
             "parse_mode": parse_mode if caption else None,
         }
-    return {
-        "type": "video" if item.item.media_type is MediaType.VIDEO else "photo",
+    media_type = "video" if item.item.media_type is MediaType.VIDEO else "photo"
+    media: dict[str, Any] = {
+        "type": media_type,
         "media": _file_payload(item.path),
         "caption": caption,
         "parse_mode": parse_mode if caption else None,
     }
+    if media_type == "video":
+        media["supports_streaming"] = True
+    return media
 
 
 def _needs_raw_media_group(items: list[DownloadedMedia]) -> bool:

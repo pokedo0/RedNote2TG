@@ -32,10 +32,10 @@ class FakeBot:
         self.calls.append(("photo", chat_id, photo, caption, parse_mode))
         return self._msg()
 
-    async def send_video(self, chat_id, video, caption=None, parse_mode=None):
+    async def send_video(self, chat_id, video, caption=None, parse_mode=None, supports_streaming=None):
         if self.fail_media:
             raise RuntimeError("video failed")
-        self.calls.append(("video", chat_id, video, caption, parse_mode))
+        self.calls.append(("video", chat_id, video, caption, parse_mode, supports_streaming))
         return self._msg()
 
     async def send_live_photo(self, chat_id, live_photo, photo, caption=None, parse_mode=None):
@@ -169,6 +169,20 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, PublishStatus.SENT)
         self.assertEqual(bot.calls[0][0], "photo")
 
+    async def test_single_video_publish_supports_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.mp4"
+            path.write_bytes(b"v")
+            media = [DownloadedMedia(MediaItem("https://x/a.mp4", MediaType.VIDEO), path, 1)]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@c")
+
+            result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "video")
+        self.assertIs(bot.calls[0][5], True)
+
     async def test_publish_note_can_override_target_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "a.jpg"
@@ -205,6 +219,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, PublishStatus.SENT)
         self.assertEqual(bot.calls[0][0], "live_photo")
+        self.assertEqual(len(bot.calls[0]), 6)
 
     async def test_live_photo_without_downloaded_video_publishes_as_photo(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,16 +326,39 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bot.calls[0][3])
         self.assertEqual(bot.calls[1][3], 10)
 
+    async def test_album_video_supports_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            photo_path = Path(tmp) / "photo.jpg"
+            video_path = Path(tmp) / "video.mp4"
+            photo_path.write_bytes(b"x")
+            video_path.write_bytes(b"v")
+            media = [
+                DownloadedMedia(MediaItem("https://x/photo.jpg", MediaType.IMAGE), photo_path, 1),
+                DownloadedMedia(MediaItem("https://x/video.mp4", MediaType.VIDEO), video_path, 1),
+            ]
+            bot = FakeBot()
+            publisher = TelegramPublisher(bot, "@c")
+
+            result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.calls[0][0], "group")
+        video = bot.calls[0][2][1]
+        self.assertIs(video.supports_streaming, True)
+
     async def test_mixed_live_photo_album_uses_raw_media_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             photo_path = Path(tmp) / "photo.jpg"
+            video_path = Path(tmp) / "video.mp4"
             live_photo_path = Path(tmp) / "live.jpg"
             live_video_path = Path(tmp) / "live.mp4"
             photo_path.write_bytes(b"x")
+            video_path.write_bytes(b"v")
             live_photo_path.write_bytes(b"x")
             live_video_path.write_bytes(b"v")
             media = [
                 DownloadedMedia(MediaItem("https://x/photo.jpg", MediaType.IMAGE), photo_path, 1),
+                DownloadedMedia(MediaItem("https://x/video.mp4", MediaType.VIDEO), video_path, 1),
                 DownloadedMedia(
                     MediaItem("https://x/live.jpg", MediaType.LIVE_PHOTO, live_video_url="https://x/live.mp4"),
                     live_photo_path,
@@ -338,9 +376,13 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.calls[0][0], "raw")
         raw_method = bot.calls[0][1]
         self.assertEqual(raw_method.__api_method__, "sendMediaGroup")
-        self.assertEqual([item["type"] for item in raw_method.media], ["photo", "live_photo"])
+        self.assertEqual([item["type"] for item in raw_method.media], ["photo", "video", "live_photo"])
         self.assertIsNotNone(raw_method.media[0]["caption"])
+        self.assertNotIn("supports_streaming", raw_method.media[0])
+        self.assertIs(raw_method.media[1]["supports_streaming"], True)
         self.assertIsNone(raw_method.media[1]["caption"])
+        self.assertNotIn("supports_streaming", raw_method.media[2])
+        self.assertIsNone(raw_method.media[2]["caption"])
 
 
 if __name__ == "__main__":
