@@ -421,6 +421,26 @@ def extract_xhs_url(text: str) -> str | None:
     return match.group(0).rstrip(".,;，。；")
 
 
+async def handle_ping(message, runner: PublishJobRunner, admin_user_ids: tuple[int, ...]) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, admin_user_ids):
+        await message.answer("unauthorized")
+        return
+    try:
+        data = runner.source.client.unread_message()
+        # data is the full JSON response dict from XHS API
+        unread_counts = []
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key not in ("success", "msg", "code") and isinstance(value, (int, float)):
+                    unread_counts.append(f"  {key}={value}")
+        counts_text = "\n".join(unread_counts) if unread_counts else "  (无未读)"
+        await message.answer(f"✅ Cookie 有效\n{counts_text}")
+    except Exception as exc:
+        logger.warning("ping cookie check failed: %s", exc)
+        await message.answer(f"❌ Cookie 已失效或请求异常\n{exc}")
+
+
 async def handle_update_cookie(
     message,
     runner: PublishJobRunner,
@@ -503,6 +523,10 @@ def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, sc
     @dispatcher.message(Command("note"))
     async def _note(message):
         await handle_fetch_note(message, runner, admin_user_ids)
+
+    @dispatcher.message(Command("ping"))
+    async def _ping(message):
+        await handle_ping(message, runner, admin_user_ids)
 
     @dispatcher.message(Command("update_cookie"))
     async def _update_cookie(message):

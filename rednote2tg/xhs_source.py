@@ -28,6 +28,9 @@ class XhsClientProtocol(Protocol):
     def fetch_note(self, note_url: str):
         ...
 
+    def unread_message(self):
+        ...
+
 
 class XhsSource:
     def __init__(

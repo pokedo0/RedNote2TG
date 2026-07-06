@@ -40,6 +40,7 @@ async def async_main(config_path: str = "config.yaml") -> None:
         BotCommand(command="start_tasks", description="开始定时爬取任务"),
         BotCommand(command="stop_tasks", description="停止定时爬取任务"),
         BotCommand(command="note", description="私聊抓取一个小红书笔记链接"),
+        BotCommand(command="ping", description="检测小红书Cookie是否有效"),
         BotCommand(command="update_cookie", description="更新小红书Cookie"),
     ])
     try:
