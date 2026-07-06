@@ -28,8 +28,9 @@ Edit `config.yaml`:
 - `sources.keywords`: keyword search configuration.
 - `sources.homefeed`: homefeed recommendation configuration.
 - `publishing.notes_per_run`: total notes to publish per scheduled run.
+- `logging`: console and persistent file logging. By default logs are written to `logs/rednote2tg.log`, rotated at 5 MB, compressed after rotation, and cleaned after 14 days or 20 rotated files.
 - `dedup.ttl_days`: short-term dedup window, 7 to 14 days.
-- `schedule.times`: daily publish times in `schedule.timezone`.
+- `schedule.interval_minutes`: publish interval in `schedule.timezone`.
 
 `config.yaml` is ignored by git because it contains secrets.
 

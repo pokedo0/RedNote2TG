@@ -52,6 +52,14 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.schedule.quiet_window.start, "03:00")
         self.assertEqual(config.schedule.quiet_window.end, "09:00")
         self.assertFalse(config.debug.enabled)
+        self.assertEqual(config.logging.level, "INFO")
+        self.assertTrue(config.logging.console_enabled)
+        self.assertTrue(config.logging.file_enabled)
+        self.assertEqual(config.logging.file_path, "logs/rednote2tg.log")
+        self.assertEqual(config.logging.max_bytes, 5 * 1024 * 1024)
+        self.assertEqual(config.logging.retention_days, 14)
+        self.assertEqual(config.logging.max_files, 20)
+        self.assertTrue(config.logging.compress_rotated)
 
     def test_parse_config_accepts_retry_after_padding(self):
         data = base_config()
@@ -77,6 +85,30 @@ class ConfigModelsTest(unittest.TestCase):
 
         self.assertTrue(config.debug.enabled)
 
+    def test_parse_config_accepts_logging_config(self):
+        data = base_config()
+        data["logging"] = {
+            "level": "warning",
+            "console_enabled": False,
+            "file_enabled": True,
+            "file_path": "logs/custom.log",
+            "max_bytes": 1024,
+            "retention_days": 7,
+            "max_files": 3,
+            "compress_rotated": False,
+        }
+
+        config = parse_config(data)
+
+        self.assertEqual(config.logging.level, "WARNING")
+        self.assertFalse(config.logging.console_enabled)
+        self.assertTrue(config.logging.file_enabled)
+        self.assertEqual(config.logging.file_path, "logs/custom.log")
+        self.assertEqual(config.logging.max_bytes, 1024)
+        self.assertEqual(config.logging.retention_days, 7)
+        self.assertEqual(config.logging.max_files, 3)
+        self.assertFalse(config.logging.compress_rotated)
+
     def test_load_config_reads_yaml_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.yaml"
@@ -94,6 +126,11 @@ class ConfigModelsTest(unittest.TestCase):
             config = load_config(path)
 
         self.assertEqual(config.sources.keywords.rules_path, str(Path(tmp) / "keyword_rules.yaml"))
+
+    def test_config_example_is_valid(self):
+        config = load_config(Path(__file__).resolve().parents[1] / "config.example.yaml")
+
+        self.assertEqual(config.logging.file_path, "logs/rednote2tg.log")
 
     def test_rejects_missing_keyword_rules_path_when_enabled(self):
         data = base_config()
@@ -136,6 +173,24 @@ class ConfigModelsTest(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             parse_config(data)
+
+    def test_rejects_bad_logging_config(self):
+        invalid_configs = [
+            ("level", "TRACE"),
+            ("console_enabled", "true"),
+            ("file_enabled", "true"),
+            ("file_path", ""),
+            ("max_bytes", 0),
+            ("retention_days", 0),
+            ("max_files", 0),
+            ("compress_rotated", "true"),
+        ]
+        for key, value in invalid_configs:
+            data = base_config()
+            data["logging"] = {key: value}
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    parse_config(data)
 
     def test_rejects_bad_schedule_time(self):
         data = base_config()

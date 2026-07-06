@@ -31,8 +31,8 @@ class DebugMessage:
 
 
 async def run_live_once(args: argparse.Namespace) -> int:
-    configure_logging()
     config = load_config(args.config)
+    configure_logging(config.logging)
     if args.notes_per_run is not None:
         config = replace(config, publishing=replace(config.publishing, notes_per_run=args.notes_per_run))
 

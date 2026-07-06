@@ -13,3 +13,4 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./keyword_rules.yaml:/app/keyword_rules.yaml:ro
       - ./data:/app/data
+      - ./logs:/app/logs

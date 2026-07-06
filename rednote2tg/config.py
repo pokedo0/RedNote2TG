@@ -87,6 +87,18 @@ class DebugConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str = "INFO"
+    console_enabled: bool = True
+    file_enabled: bool = True
+    file_path: str = "logs/rednote2tg.log"
+    max_bytes: int = 5 * 1024 * 1024
+    retention_days: int = 14
+    max_files: int = 20
+    compress_rotated: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     telegram: TelegramConfig
     xhs: XhsConfig
@@ -96,6 +108,7 @@ class AppConfig:
     schedule: ScheduleConfig
     storage: StorageConfig
     debug: DebugConfig
+    logging: LoggingConfig
 
 
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -121,6 +134,7 @@ def parse_config(data: dict, base_path: str | Path | None = None) -> AppConfig:
     schedule = _parse_schedule(data.get("schedule") or {})
     storage = _parse_storage(data.get("storage") or {})
     debug = _parse_debug(data.get("debug") or {})
+    logging_config = _parse_logging(data.get("logging") or {})
     return AppConfig(
         telegram=telegram,
         xhs=xhs,
@@ -130,6 +144,7 @@ def parse_config(data: dict, base_path: str | Path | None = None) -> AppConfig:
         schedule=schedule,
         storage=storage,
         debug=debug,
+        logging=logging_config,
     )
 
 
@@ -242,6 +257,25 @@ def _parse_storage(data: dict) -> StorageConfig:
 
 def _parse_debug(data: dict) -> DebugConfig:
     return DebugConfig(enabled=_bool(data.get("enabled", False), "debug.enabled"))
+
+
+def _parse_logging(data: dict) -> LoggingConfig:
+    level = str(data.get("level", "INFO")).strip().upper()
+    if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ConfigError("logging.level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
+    file_path = str(data.get("file_path", "logs/rednote2tg.log")).strip()
+    if not file_path:
+        raise ConfigError("logging.file_path is required")
+    return LoggingConfig(
+        level=level,
+        console_enabled=_bool(data.get("console_enabled", True), "logging.console_enabled"),
+        file_enabled=_bool(data.get("file_enabled", True), "logging.file_enabled"),
+        file_path=file_path,
+        max_bytes=_positive_int(data.get("max_bytes", 5 * 1024 * 1024), "logging.max_bytes"),
+        retention_days=_positive_int(data.get("retention_days", 14), "logging.retention_days"),
+        max_files=_positive_int(data.get("max_files", 20), "logging.max_files"),
+        compress_rotated=_bool(data.get("compress_rotated", True), "logging.compress_rotated"),
+    )
 
 
 def _positive_int(value: object, name: str) -> int:

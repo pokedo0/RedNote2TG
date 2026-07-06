@@ -1,6 +1,8 @@
 config.yaml
 data/
 logs/
+*.log
+*.log.*
 *.db
 *.sqlite
 *.sqlite3

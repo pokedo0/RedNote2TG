@@ -30,6 +30,16 @@ publishing:
 debug:
   enabled: false
 
+logging:
+  level: "INFO"
+  console_enabled: true
+  file_enabled: true
+  file_path: "logs/rednote2tg.log"
+  max_bytes: 5242880
+  retention_days: 14
+  max_files: 20
+  compress_rotated: true
+
 dedup:
   ttl_days: 14
 

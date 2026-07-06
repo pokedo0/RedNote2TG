@@ -12,8 +12,8 @@ from rednote2tg.xhs_source import XhsSource
 
 
 async def async_main(config_path: str = "config.yaml") -> None:
-    configure_logging()
     config = load_config(config_path)
+    configure_logging(config.logging)
 
     from aiogram import Bot, Dispatcher
 
