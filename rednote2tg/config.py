@@ -54,6 +54,7 @@ class PublishingConfig:
     media_strategy: str = "all"
     caption_parse_mode: str = "HTML"
     telegram_retry_after_padding_seconds: float = 1.0
+    note_interval_seconds: float = 0.0
     upload_live_photo: bool = True
 
 
@@ -207,6 +208,10 @@ def _parse_publishing(data: dict) -> PublishingConfig:
         telegram_retry_after_padding_seconds=_nonnegative_float(
             data.get("telegram_retry_after_padding_seconds", 1.0),
             "publishing.telegram_retry_after_padding_seconds",
+        ),
+        note_interval_seconds=_nonnegative_float(
+            data.get("note_interval_seconds", 0.0),
+            "publishing.note_interval_seconds",
         ),
         upload_live_photo=_bool(data.get("upload_live_photo", True), "publishing.upload_live_photo"),
     )

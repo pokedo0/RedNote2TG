@@ -48,6 +48,7 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.sources.keywords.rules_path, "keyword_rules.yaml")
         self.assertEqual(config.publishing.notes_per_run, 3)
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 1.0)
+        self.assertEqual(config.publishing.note_interval_seconds, 0.0)
         self.assertTrue(config.publishing.upload_live_photo)
         self.assertEqual(config.schedule.interval_minutes, 60)
         self.assertEqual(config.schedule.jitter_minutes, 10)
@@ -70,6 +71,14 @@ class ConfigModelsTest(unittest.TestCase):
         config = parse_config(data)
 
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 2.5)
+
+    def test_parse_config_accepts_note_interval_seconds(self):
+        data = base_config()
+        data["publishing"]["note_interval_seconds"] = 12.5
+
+        config = parse_config(data)
+
+        self.assertEqual(config.publishing.note_interval_seconds, 12.5)
 
     def test_parse_config_accepts_upload_live_photo_false(self):
         data = base_config()
@@ -169,6 +178,13 @@ class ConfigModelsTest(unittest.TestCase):
     def test_rejects_negative_retry_after_padding(self):
         data = base_config()
         data["publishing"]["telegram_retry_after_padding_seconds"] = -1
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_rejects_negative_note_interval_seconds(self):
+        data = base_config()
+        data["publishing"]["note_interval_seconds"] = -1
 
         with self.assertRaises(ConfigError):
             parse_config(data)

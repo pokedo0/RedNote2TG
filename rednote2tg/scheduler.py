@@ -53,6 +53,7 @@ class PublishJobRunner:
         failed = 0
         failed_media = 0
         pending_retry_after_seconds: float | None = None
+        wait_before_next_note = False
 
         for note in notes:
             if published >= self.config.publishing.notes_per_run:
@@ -61,6 +62,16 @@ class PublishJobRunner:
                 skipped += 1
                 logger.info("note skipped: note_id=%s reason=active_dedup", note.note_id)
                 continue
+
+            if wait_before_next_note:
+                note_interval_seconds = self.config.publishing.note_interval_seconds
+                if note_interval_seconds > 0:
+                    logger.info(
+                        "note interval before next upload: sleep_seconds=%s",
+                        note_interval_seconds,
+                    )
+                    await asyncio.sleep(note_interval_seconds)
+                wait_before_next_note = False
 
             if pending_retry_after_seconds is not None:
                 padding_seconds = getattr(self.publisher, "retry_after_padding_seconds", 0.0)
@@ -97,12 +108,21 @@ class PublishJobRunner:
                 active_ids.add(note.note_id)
                 published += 1
                 published_media += len(note.media)
-                logger.info(
-                    "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s",
-                    note.note_id,
-                    result.status.value,
-                    result.telegram_message_ids,
-                )
+                if result.error_message:
+                    logger.info(
+                        "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s error_message=%s",
+                        note.note_id,
+                        result.status.value,
+                        result.telegram_message_ids,
+                        result.error_message,
+                    )
+                else:
+                    logger.info(
+                        "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s",
+                        note.note_id,
+                        result.status.value,
+                        result.telegram_message_ids,
+                    )
             else:
                 failed += 1
                 failed_media += len(note.media)
@@ -113,6 +133,7 @@ class PublishJobRunner:
                     result.status.value,
                     result.error_message or "unknown",
                 )
+            wait_before_next_note = True
 
         if errors:
             logger.warning("source errors during run: %s", errors)

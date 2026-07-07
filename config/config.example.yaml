@@ -26,6 +26,7 @@ publishing:
   media_strategy: "all"
   caption_parse_mode: "HTML"
   telegram_retry_after_padding_seconds: 2
+  note_interval_seconds: 5
   upload_live_photo: true  # false = Live Photo 按普通图片上传
 
 debug:

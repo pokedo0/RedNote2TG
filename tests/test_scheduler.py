@@ -67,7 +67,7 @@ class FakePublisher:
 
     async def publish_note(self, note, media, chat_id=None):
         self.published.append((note, media, chat_id))
-        return PublishResult(PublishStatus.SENT_DEGRADED, (100,))
+        return PublishResult(PublishStatus.SENT, (100,))
 
     async def send_debug_message(self, text):
         self.debug_messages.append(text)
@@ -190,7 +190,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
                 FakeDownloader(),
                 SequencePublisher(
                     [
-                        PublishResult(PublishStatus.SENT_DEGRADED, (101,)),
+                        PublishResult(PublishStatus.SENT, (101,)),
                         PublishResult(PublishStatus.FAILED, error_message="bad"),
                     ]
                 ),
@@ -224,6 +224,51 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run_once()
 
             self.assertEqual(result["telegram_retry_after_count"], 2)
+            store.close()
+
+    async def test_runner_waits_between_note_uploads_after_previous_note_finishes(self):
+        data = base_config()
+        data["publishing"]["note_interval_seconds"] = 2.5
+        config = parse_config(data)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1"), note("n2"), note("n3")]),
+                store,
+                FakeDownloader(),
+                SequencePublisher(
+                    [
+                        PublishResult(PublishStatus.SENT, (101,)),
+                        PublishResult(PublishStatus.SENT, (102,)),
+                        PublishResult(PublishStatus.SENT, (103,)),
+                    ]
+                ),
+            )
+
+            with patch("rednote2tg.scheduler.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                result = await runner.run_once()
+
+            self.assertEqual(result["published"], 3)
+            self.assertEqual([await_args.args[0] for await_args in sleep.await_args_list], [2.5, 2.5])
+            store.close()
+
+    async def test_runner_logs_error_message_for_degraded_success(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1")]),
+                store,
+                FakeDownloader(),
+                SequencePublisher([PublishResult(PublishStatus.SENT_DEGRADED, (101,), "media bad")]),
+            )
+
+            with self.assertLogs("rednote2tg.scheduler", level="INFO") as logs:
+                await runner.run_once()
+
+            self.assertTrue(any("error_message=media bad" in line for line in logs.output))
             store.close()
 
     async def test_runner_sends_debug_summary_to_channel_after_published_note(self):
@@ -274,7 +319,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
                 SequencePublisher(
                     [
                         PublishResult(PublishStatus.FAILED, error_message="bad"),
-                        PublishResult(PublishStatus.SENT_DEGRADED, (101,)),
+                        PublishResult(PublishStatus.SENT, (101,)),
                     ]
                 ),
             )
@@ -293,7 +338,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         publisher = SequencePublisher(
             [
                 PublishResult(PublishStatus.FAILED, error_message="flood", retry_after_seconds=44),
-                PublishResult(PublishStatus.SENT_DEGRADED, (101,)),
+                PublishResult(PublishStatus.SENT, (101,)),
             ]
         )
         publisher.retry_after_padding_seconds = 1.0

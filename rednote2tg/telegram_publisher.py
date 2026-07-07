@@ -52,20 +52,7 @@ class TelegramPublisher:
     async def publish_note(self, note: Note, media: list[DownloadedMedia], chat_id: str | int | None = None) -> PublishResult:
         caption = render_caption(note)
         target_chat_id = chat_id if chat_id is not None else self.channel_id
-        try:
-            if not media:
-                msg = await self._send_with_retry(
-                    self.bot.send_message,
-                    target_chat_id,
-                    caption,
-                    parse_mode=self.parse_mode,
-                )
-                return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]))
-            messages = await self._send_media(media, caption, target_chat_id)
-            return PublishResult(PublishStatus.SENT, _message_ids(messages))
-        except TelegramRetryAfter as retry_exc:
-            return _retry_after_failure(retry_exc)
-        except Exception as media_exc:
+        if not media:
             try:
                 msg = await self._send_with_retry(
                     self.bot.send_message,
@@ -73,11 +60,33 @@ class TelegramPublisher:
                     caption,
                     parse_mode=self.parse_mode,
                 )
-                return PublishResult(PublishStatus.SENT_DEGRADED, _message_ids([msg]), str(media_exc))
+                return PublishResult(PublishStatus.SENT, _message_ids([msg]))
             except TelegramRetryAfter as retry_exc:
                 return _retry_after_failure(retry_exc)
             except Exception as text_exc:
                 return PublishResult(PublishStatus.FAILED, error_message=str(text_exc))
+
+        try:
+            messages = await self._send_media(media, caption, target_chat_id)
+            return PublishResult(PublishStatus.SENT, _message_ids(messages))
+        except TelegramRetryAfter as retry_exc:
+            return _retry_after_failure(retry_exc)
+        except Exception as first_media_exc:
+            logger.warning(
+                "telegram media publish failed; retrying note once: note_id=%s error=%s",
+                note.note_id,
+                first_media_exc,
+            )
+            try:
+                messages = await self._send_media(media, caption, target_chat_id)
+                return PublishResult(PublishStatus.SENT, _message_ids(messages))
+            except TelegramRetryAfter as retry_exc:
+                return _retry_after_failure(retry_exc)
+            except Exception as second_media_exc:
+                return PublishResult(
+                    PublishStatus.FAILED,
+                    error_message=f"media publish failed twice: first={first_media_exc}; second={second_media_exc}",
+                )
 
     async def _send_with_retry(self, send, *args, **kwargs):
         for attempt in range(self.retries + 1):

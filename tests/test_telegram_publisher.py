@@ -14,6 +14,8 @@ class FakeBot:
     def __init__(self):
         self.calls = []
         self.fail_media = False
+        self.media_attempts = 0
+        self.media_failures_remaining = 0
         self.group_attempts = 0
         self.retry_after_group_failures = 0
         self.next_id = 1
@@ -27,18 +29,30 @@ class FakeBot:
         return self._msg()
 
     async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+        self.media_attempts += 1
+        if self.media_failures_remaining > 0:
+            self.media_failures_remaining -= 1
+            raise RuntimeError("photo failed")
         if self.fail_media:
             raise RuntimeError("photo failed")
         self.calls.append(("photo", chat_id, photo, caption, parse_mode))
         return self._msg()
 
     async def send_video(self, chat_id, video, caption=None, parse_mode=None, supports_streaming=None):
+        self.media_attempts += 1
+        if self.media_failures_remaining > 0:
+            self.media_failures_remaining -= 1
+            raise RuntimeError("video failed")
         if self.fail_media:
             raise RuntimeError("video failed")
         self.calls.append(("video", chat_id, video, caption, parse_mode, supports_streaming))
         return self._msg()
 
     async def send_live_photo(self, chat_id, live_photo, photo, caption=None, parse_mode=None):
+        self.media_attempts += 1
+        if self.media_failures_remaining > 0:
+            self.media_failures_remaining -= 1
+            raise RuntimeError("live photo failed")
         if self.fail_media:
             raise RuntimeError("live photo failed")
         self.calls.append(("live_photo", chat_id, live_photo, photo, caption, parse_mode))
@@ -240,7 +254,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, PublishStatus.SENT)
         self.assertEqual(bot.calls[0][0], "photo")
 
-    async def test_media_failure_degrades_to_text(self):
+    async def test_media_failure_retries_once_then_fails_without_text_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "a.jpg"
             path.write_bytes(b"x")
@@ -249,10 +263,30 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
             bot.fail_media = True
             publisher = TelegramPublisher(bot, "@c", retries=2)
 
+            with self.assertLogs("rednote2tg.telegram_publisher", level="WARNING") as logs:
+                result = await publisher.publish_note(sample_note(), media)
+
+        self.assertEqual(result.status, PublishStatus.FAILED)
+        self.assertIn("media publish failed twice", result.error_message)
+        self.assertEqual(bot.media_attempts, 2)
+        self.assertFalse(any(call[0] == "message" for call in bot.calls))
+        self.assertIn("retrying note once", logs.output[0])
+
+    async def test_media_failure_retries_once_then_sends_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.jpg"
+            path.write_bytes(b"x")
+            media = [DownloadedMedia(MediaItem("https://x/a.jpg", MediaType.IMAGE), path, 1)]
+            bot = FakeBot()
+            bot.media_failures_remaining = 1
+            publisher = TelegramPublisher(bot, "@c", retries=2)
+
             result = await publisher.publish_note(sample_note(), media)
 
-        self.assertEqual(result.status, PublishStatus.SENT_DEGRADED)
-        self.assertEqual(bot.calls[-1][0], "message")
+        self.assertEqual(result.status, PublishStatus.SENT)
+        self.assertEqual(bot.media_attempts, 2)
+        self.assertEqual(bot.calls[-1][0], "photo")
+        self.assertFalse(any(call[0] == "message" for call in bot.calls))
 
     async def test_retry_after_waits_and_retries_media_group(self):
         with tempfile.TemporaryDirectory() as tmp:

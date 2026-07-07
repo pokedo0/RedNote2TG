@@ -56,4 +56,4 @@ Useful bot commands:
 - Each run removes expired dedup records, collects candidates, skips active note IDs, and publishes up to `notes_per_run` notes.
 - Deduplication only covers the configured 7-14 day window. After expiry, the same note may be sent again.
 - All note media is attempted. Media groups are split into chunks of 10, and only the first group has the full caption.
-- Media download or upload failures are retried twice. If media still fails, the service sends text-only fallback and records `sent_degraded`.
+- Media download or upload failures are retried. If media still fails, the note is marked `failed`; no text-only fallback is sent for media failures.
