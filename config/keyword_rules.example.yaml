@@ -1,0 +1,40 @@
+joiner: " "
+
+length_weights:
+  3: 0.15
+  4: 0.5
+  5: 0.35
+
+required_pools:
+  - ["连衣裙", "半身裙", "长裙"]
+  - ["雪纺", "真丝", "蕾丝", "纯棉", "针织", "牛仔"]
+
+optional_groups:
+  attributes:
+    weight: 0.50
+    pools:
+      - ["黑色", "白色", "粉色", "碎花"]
+      - ["法式", "复古", "甜美", "极简", "通勤"]
+      - "V领"
+      - ["收腰", "显瘦"]
+      - "百搭"
+      - "设计感"
+
+  long_tail:
+    weight: 0.40
+    pools:
+      - ["穿搭", "搭配", "ootd"]
+      - "夏日"
+      - "裙"
+      - ["仙女", "女神", "气质", "温柔", "辣妹", "轻熟", "高级感"]
+
+  brands:
+    weight: 0.10
+    max_total_length: 4
+    pools:
+      - ["zara", "ur", "cos", "优衣库", "bm", "Vintage", "淘宝", "小众"]
+
+time_weights:
+  unlimited: 0.55
+  half_year: 0.35
+  one_week: 0.10

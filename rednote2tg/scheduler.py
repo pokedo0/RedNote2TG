@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from datetime import UTC, datetime
@@ -11,9 +12,9 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from rednote2tg.config import AppConfig, XhsConfig
+from rednote2tg.config import AppConfig, XhsConfig, load_config
 from rednote2tg.db import NoteStore
-from rednote2tg.keyword_rules import describe_note_time
+from rednote2tg.keyword_rules import describe_note_time, load_keyword_rules
 from rednote2tg.media import MediaDownloader
 from rednote2tg.models import PublishResult, PublishStatus
 from rednote2tg.telegram_publisher import TelegramPublisher
@@ -146,7 +147,25 @@ class PublishJobRunner:
         return summary
 
 
-def create_scheduler(config: AppConfig, runner: PublishJobRunner):
+@dataclass
+class RuntimeState:
+    config: AppConfig
+    runner: PublishJobRunner
+    store: NoteStore
+    scheduler: Any | None
+    config_path: str = "config/config.yaml"
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @property
+    def publisher(self):
+        return self.runner.publisher
+
+    async def run_once(self) -> dict[str, Any]:
+        async with self.lock:
+            return await self.runner.run_once()
+
+
+def create_scheduler(config: AppConfig, runner):
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(config.schedule.timezone))
@@ -271,6 +290,15 @@ async def handle_run_once(message, runner: PublishJobRunner, admin_user_ids: tup
         await message.answer("unauthorized")
         return
     result = await runner.run_once()
+    await message.answer(format_run_once_summary(result))
+
+
+async def handle_runtime_run_once(message, state: RuntimeState) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, state.config.telegram.admin_user_ids):
+        await message.answer("unauthorized")
+        return
+    result = await state.run_once()
     await message.answer(format_run_once_summary(result))
 
 
@@ -463,7 +491,7 @@ async def handle_update_cookie(
 
     new_cookie = parts[1].strip()
 
-    # Update config.yaml — preserve comments and formatting
+    # Update config file — preserve comments and formatting
     try:
         config_file = Path(config_path)
         content = config_file.read_text(encoding="utf-8")
@@ -498,7 +526,129 @@ async def handle_update_cookie(
     await message.answer("✅ Cookie 已更新并生效")
 
 
-def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, scheduler, admin_user_ids: tuple[int, ...], config_path: str = "config.yaml") -> None:
+async def handle_reload(message, state: RuntimeState) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, state.config.telegram.admin_user_ids):
+        await message.answer("unauthorized")
+        return
+
+    async with state.lock:
+        try:
+            new_config = load_config(state.config_path)
+            _validate_reload_config(new_config)
+            blocked_changes = _unsupported_reload_changes(state.config, new_config)
+        except Exception as exc:
+            logger.warning("config reload validation failed: %s", exc)
+            await message.answer(f"❌ 热加载失败：{exc}")
+            return
+
+        if blocked_changes:
+            await message.answer(
+                "❌ 热加载失败：以下配置变化需要重启："
+                + ", ".join(blocked_changes)
+            )
+            return
+
+        try:
+            _apply_reload_config(state, new_config)
+        except Exception as exc:
+            logger.exception("config reload apply failed")
+            await message.answer(f"❌ 热加载失败：{exc}")
+            return
+
+    await message.answer(
+        "✅ 配置已热加载\n"
+        f"{_format_schedule_status(state.config)}\n"
+        f"keyword_rules={state.config.sources.keywords.rules_path or '-'}"
+    )
+
+
+def _validate_reload_config(config: AppConfig) -> None:
+    if config.sources.keywords.enabled:
+        load_keyword_rules(config.sources.keywords.rules_path)
+
+
+def _unsupported_reload_changes(old: AppConfig, new: AppConfig) -> list[str]:
+    changes: list[str] = []
+    if old.telegram.bot_token != new.telegram.bot_token:
+        changes.append("telegram.bot_token")
+    if old.telegram.channel_id != new.telegram.channel_id:
+        changes.append("telegram.channel_id")
+    if old.telegram.admin_user_ids != new.telegram.admin_user_ids:
+        changes.append("telegram.admin_user_ids")
+    if old.storage != new.storage:
+        changes.append("storage")
+    if old.debug != new.debug:
+        changes.append("debug")
+    if old.logging != new.logging:
+        changes.append("logging")
+    if old.publishing.media_strategy != new.publishing.media_strategy:
+        changes.append("publishing.media_strategy")
+    if old.publishing.caption_parse_mode != new.publishing.caption_parse_mode:
+        changes.append("publishing.caption_parse_mode")
+    return changes
+
+
+def _apply_reload_config(state: RuntimeState, new_config: AppConfig) -> None:
+    old_config = state.config
+    new_client = None
+    if old_config.xhs != new_config.xhs:
+        new_client = XhsSource._create_client(new_config.xhs)
+
+    if old_config.schedule != new_config.schedule and state.scheduler is not None:
+        _replace_publish_schedules(state.scheduler, new_config, state)
+
+    state.config = new_config
+    state.runner.config = new_config
+    state.runner.source.sources_config = new_config.sources
+    if new_client is not None:
+        state.runner.source.client = new_client
+    state.runner.publisher.retry_after_padding_seconds = (
+        new_config.publishing.telegram_retry_after_padding_seconds
+    )
+
+
+def _replace_publish_schedules(scheduler, config: AppConfig, runner) -> None:
+    was_paused = _is_scheduler_paused(scheduler)
+    _clear_publish_jobs(scheduler)
+    register_schedules(scheduler, config, runner)
+    if was_paused:
+        scheduler.pause()
+
+
+def _clear_publish_jobs(scheduler) -> None:
+    jobs = list(scheduler.get_jobs()) if hasattr(scheduler, "get_jobs") else []
+    if hasattr(scheduler, "remove_job"):
+        for job in jobs:
+            job_id = _job_id(job)
+            if job_id and job_id.startswith("publish-"):
+                scheduler.remove_job(job_id)
+        return
+
+    raw_jobs = getattr(scheduler, "jobs", None)
+    if isinstance(raw_jobs, list):
+        scheduler.jobs = [
+            job
+            for job in raw_jobs
+            if not ((_job_id(job) or "").startswith("publish-"))
+        ]
+
+
+def _job_id(job) -> str | None:
+    job_id = getattr(job, "id", None)
+    if job_id is not None:
+        return str(job_id)
+    if isinstance(job, tuple) and len(job) >= 3 and isinstance(job[2], dict):
+        value = job[2].get("id")
+        return str(value) if value is not None else None
+    return None
+
+
+def _is_scheduler_paused(scheduler) -> bool:
+    return getattr(scheduler, "paused", False) or getattr(scheduler, "state", None) == 2
+
+
+def register_handlers(dispatcher, state: RuntimeState) -> None:
     try:
         from aiogram.filters import Command
     except Exception as exc:  # pragma: no cover - runtime dependency guard.
@@ -506,28 +656,32 @@ def register_handlers(dispatcher, runner: PublishJobRunner, store: NoteStore, sc
 
     @dispatcher.message(Command("run_once"))
     async def _run_once(message):
-        await handle_run_once(message, runner, admin_user_ids)
+        await handle_runtime_run_once(message, state)
 
     @dispatcher.message(Command("status"))
     async def _status(message):
-        await handle_status(message, store, scheduler, admin_user_ids, runner.config)
+        await handle_status(message, state.store, state.scheduler, state.config.telegram.admin_user_ids, state.config)
 
     @dispatcher.message(Command("start_tasks"))
     async def _start_tasks(message):
-        await handle_start_tasks(message, scheduler, admin_user_ids)
+        await handle_start_tasks(message, state.scheduler, state.config.telegram.admin_user_ids)
 
     @dispatcher.message(Command("stop_tasks"))
     async def _stop_tasks(message):
-        await handle_stop_tasks(message, scheduler, admin_user_ids)
+        await handle_stop_tasks(message, state.scheduler, state.config.telegram.admin_user_ids)
 
     @dispatcher.message(Command("note"))
     async def _note(message):
-        await handle_fetch_note(message, runner, admin_user_ids)
+        await handle_fetch_note(message, state.runner, state.config.telegram.admin_user_ids)
 
     @dispatcher.message(Command("ping"))
     async def _ping(message):
-        await handle_ping(message, runner, admin_user_ids)
+        await handle_ping(message, state.runner, state.config.telegram.admin_user_ids)
 
     @dispatcher.message(Command("update_cookie"))
     async def _update_cookie(message):
-        await handle_update_cookie(message, runner, admin_user_ids, config_path)
+        await handle_update_cookie(message, state.runner, state.config.telegram.admin_user_ids, state.config_path)
+
+    @dispatcher.message(Command("reload"))
+    async def _reload(message):
+        await handle_reload(message, state)

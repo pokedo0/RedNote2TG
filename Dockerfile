@@ -21,6 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY requirements.txt pyproject.toml README.md ./
+COPY config ./config
 COPY rednote2tg ./rednote2tg
 
 RUN pip install --no-cache-dir -r requirements.txt \

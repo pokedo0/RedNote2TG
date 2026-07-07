@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -5,17 +6,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import yaml
+
 from tests.test_config_models import base_config
-from rednote2tg.config import parse_config
+from tests.test_keyword_rules import base_rules
+from rednote2tg.config import load_config, parse_config
 from rednote2tg.db import NoteStore
 from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, PublishResult, PublishStatus, SourceRef
 from rednote2tg.scheduler import (
     PublishJobRunner,
+    RuntimeState,
     SourceErrorAutoPause,
     extract_xhs_url,
     format_run_once_summary,
     handle_fetch_note,
+    handle_reload,
     handle_run_once,
+    handle_runtime_run_once,
     handle_status,
     is_authorized,
     register_schedules,
@@ -126,6 +133,21 @@ def note(note_id, media_count=0):
 
 
 class SchedulerTest(unittest.IsolatedAsyncioTestCase):
+    def write_runtime_files(self, tmp, data=None, rules=None):
+        root = Path(tmp)
+        config_path = root / "config.yaml"
+        rules_path = root / "keyword_rules.yaml"
+        rules_path.write_text(yaml.safe_dump(rules or base_rules(), allow_unicode=True), encoding="utf-8")
+        config_path.write_text(yaml.safe_dump(data or base_config(), allow_unicode=True), encoding="utf-8")
+        return config_path
+
+    def runtime_state(self, config, store, scheduler=None):
+        source = FakeSource([note("n1")])
+        source.sources_config = config.sources
+        source.client = object()
+        runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+        return RuntimeState(config, runner, store, scheduler or FakeScheduler())
+
     async def test_runner_respects_notes_per_run_and_dedup(self):
         data = base_config()
         data["publishing"]["notes_per_run"] = 1
@@ -530,6 +552,159 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await handle_status(message, store, None, (), config)
 
             self.assertIn("crawl=unconfigured", message.answers[0])
+            store.close()
+
+    async def test_reload_command_checks_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+            message = FakeMessage(9)
+
+            await handle_reload(message, state)
+
+            self.assertEqual(message.answers, ["unauthorized"])
+            store.close()
+
+    async def test_reload_updates_supported_runtime_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            scheduler = FakeScheduler()
+            state = self.runtime_state(config, store, scheduler)
+            state.config_path = str(config_path)
+            register_schedules(scheduler, config, state)
+
+            data["xhs"] = {"cookies": "fresh-cookie", "proxies": {"http": "http://proxy"}}
+            data["sources"]["keywords"]["search_limit_per_query"] = 7
+            data["sources"]["homefeed"] = {
+                "enabled": True,
+                "categories": ["homefeed_recommend"],
+                "limit_per_category": 5,
+            }
+            data["publishing"]["notes_per_run"] = 7
+            data["publishing"]["telegram_retry_after_padding_seconds"] = 10
+            data["publishing"]["upload_live_photo"] = False
+            data["dedup"]["ttl_days"] = 10
+            data["schedule"]["interval_minutes"] = 50
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            new_client = object()
+            message = FakeMessage(1)
+
+            with patch("rednote2tg.scheduler.XhsSource._create_client", return_value=new_client) as create_client:
+                await handle_reload(message, state)
+
+            self.assertIn("配置已热加载", message.answers[0])
+            self.assertEqual(state.config.xhs.cookies, "fresh-cookie")
+            self.assertEqual(state.runner.config.publishing.notes_per_run, 7)
+            self.assertFalse(state.runner.config.publishing.upload_live_photo)
+            self.assertEqual(state.runner.config.dedup.ttl_days, 10)
+            self.assertEqual(state.runner.source.sources_config.keywords.search_limit_per_query, 7)
+            self.assertTrue(state.runner.source.sources_config.homefeed.enabled)
+            self.assertEqual(state.runner.publisher.retry_after_padding_seconds, 10)
+            self.assertIs(state.runner.source.client, new_client)
+            create_client.assert_called_once_with(state.config.xhs)
+            job_ids = [job[2]["id"] for job in scheduler.jobs]
+            self.assertNotIn("publish-02:00", job_ids)
+            self.assertEqual(len(job_ids), len(set(job_ids)))
+            store.close()
+
+    async def test_reload_preserves_paused_scheduler_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            scheduler = FakeScheduler()
+            state = self.runtime_state(config, store, scheduler)
+            state.config_path = str(config_path)
+            register_schedules(scheduler, config, state)
+            scheduler.pause()
+            data["schedule"]["interval_minutes"] = 50
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+            await handle_reload(FakeMessage(1), state)
+
+            self.assertTrue(scheduler.paused)
+            store.close()
+
+    async def test_reload_rejects_invalid_keyword_rules_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+            bad_rules = {"length_weights": {3: 1.0}}
+            self.write_runtime_files(tmp, data, rules=bad_rules)
+            data["publishing"]["notes_per_run"] = 7
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            message = FakeMessage(1)
+
+            await handle_reload(message, state)
+
+            self.assertIn("热加载失败", message.answers[0])
+            self.assertEqual(state.runner.config.publishing.notes_per_run, 3)
+            store.close()
+
+    async def test_reload_rejects_restart_only_config_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+            data["telegram"]["channel_id"] = "@other"
+            data["publishing"]["notes_per_run"] = 7
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            message = FakeMessage(1)
+
+            await handle_reload(message, state)
+
+            self.assertIn("telegram.channel_id", message.answers[0])
+            self.assertEqual(state.config.telegram.channel_id, "@channel")
+            self.assertEqual(state.runner.config.publishing.notes_per_run, 3)
+            store.close()
+
+    async def test_reload_rejects_invalid_config_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+            data["publishing"]["notes_per_run"] = 99
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            message = FakeMessage(1)
+
+            await handle_reload(message, state)
+
+            self.assertIn("热加载失败", message.answers[0])
+            self.assertEqual(state.runner.config.publishing.notes_per_run, 3)
+            store.close()
+
+    async def test_runtime_run_once_waits_for_reload_lock(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            message = FakeMessage(1)
+
+            async with state.lock:
+                task = asyncio.create_task(handle_runtime_run_once(message, state))
+                await asyncio.sleep(0)
+                self.assertEqual(message.answers, [])
+
+            await task
+
+            self.assertIn("run_once done", message.answers[0])
             store.close()
 
     def test_extract_xhs_url_from_command_text(self):

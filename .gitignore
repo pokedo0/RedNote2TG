@@ -1,4 +1,5 @@
 config.yaml
+config/config.yaml
 data/
 logs/
 *.log

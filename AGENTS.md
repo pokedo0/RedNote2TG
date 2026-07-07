@@ -22,14 +22,14 @@ AI working guide for this repository. Keep changes small, verify facts from code
 - `rednote2tg/models.py`: shared domain models.
 - `rednote2tg/keyword_rules.py`: keyword rule loading and time/rule helpers.
 - `rednote2tg/logging.py`: logging setup and log rotation cleanup.
-- `config.example.yaml`: documented config shape and defaults.
-- `keyword_rules.yaml`: keyword search rules.
+- `config/config.example.yaml`: documented config shape and defaults.
+- `config/keyword_rules.yaml`: optional local keyword search rules override, ignored by git.
 - `tests/`: unit and integration tests.
 - `tests/debug/`: personal/manual debug scripts. Do not treat these as normal unit tests.
 
 ## Config Structure
 
-Runtime config is loaded from `config.yaml` by `rednote2tg.config.load_config`; `config.yaml` is ignored because it contains secrets. Update `config.example.yaml` and `tests/test_config_models.py` when adding or changing config fields.
+Runtime config is loaded from `config/config.yaml` by `rednote2tg.config.load_config`; `config/config.yaml` is ignored because it contains secrets. Update `config/config.example.yaml` and `tests/test_config_models.py` when adding or changing config fields.
 
 Top-level config keys:
 
@@ -46,13 +46,13 @@ Top-level config keys:
 
 ## Where To Change Common Things
 
-- Add or change YAML fields: edit `rednote2tg/config.py`, `config.example.yaml`, and `tests/test_config_models.py`.
+- Add or change YAML fields: edit `rednote2tg/config.py`, `config/config.example.yaml`, and `tests/test_config_models.py`.
 - Change scheduled publishing behavior: start in `rednote2tg/scheduler.py`, especially `PublishJobRunner`, `run_once`, and scheduler helpers. Verify with `tests/test_scheduler.py` and `tests/test_integration_dry_run.py`.
 - Change XHS collection or normalization: edit `rednote2tg/xhs_source.py`; verify with `tests/test_xhs_source.py` and relevant config tests.
 - Change Telegram output: edit `rednote2tg/telegram_publisher.py`; verify with `tests/test_telegram_publisher.py`.
 - Change media handling: edit `rednote2tg/media.py`; verify with `tests/test_media.py`.
 - Change storage/dedup logic: edit `rednote2tg/db.py`; verify with `tests/test_db.py`.
-- Change keyword rule behavior: edit `rednote2tg/keyword_rules.py` and `keyword_rules.yaml`; verify with `tests/test_keyword_rules.py`.
+- Change keyword rule behavior: edit `rednote2tg/keyword_rules.py`; use ignored `config/keyword_rules.yaml` for local rule testing; verify with `tests/test_keyword_rules.py`.
 - Change logging: edit `rednote2tg/logging.py`; verify with `tests/test_logging.py`.
 
 ## Bot Commands
@@ -75,6 +75,7 @@ Current commands:
 - `/note`: fetch a Xiaohongshu note URL in private chat.
 - `/ping`: check whether the XHS cookie still works.
 - `/update_cookie`: update XHS cookie in the config file and rebuild the client.
+- `/reload`: reload supported crawl config and keyword rules without restarting.
 
 ## Tests
 
@@ -86,6 +87,6 @@ Current commands:
 
 ## Safety Notes
 
-- `config.yaml`, logs, DB files, and downloaded media may contain secrets or local runtime data. Do not commit them.
+- `config/config.yaml`, `config/keyword_rules.yaml`, logs, DB files, and downloaded media may contain secrets or local runtime data. Do not commit them.
 - Live debug scripts may upload to Telegram or call real XHS APIs. Keep explicit confirmation flags for live actions.
 - If unsure whether a change belongs in production tests or personal debug code, put exploratory code under `tests/debug/` and keep production tests deterministic.

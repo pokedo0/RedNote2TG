@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Live debug for /run_once. It crawls real XHS notes and uploads them to the configured Telegram channel.",
     )
-    parser.add_argument("--config", default=str(ROOT / "config.yaml"), help="Path to config.yaml.")
+    parser.add_argument("--config", default=str(ROOT / "config" / "config.yaml"), help="Path to config.yaml.")
     parser.add_argument("--user-id", type=int, default=None, help="Telegram admin user id used for authorization.")
     parser.add_argument("--notes-per-run", type=int, default=None, help="Override publishing.notes_per_run for this debug run.")
     parser.add_argument("--yes", action="store_true", help="Required: confirm this will upload to Telegram.")

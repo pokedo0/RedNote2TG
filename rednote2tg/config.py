@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -114,7 +115,7 @@ class AppConfig:
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 
-def load_config(path: str | Path = "config.yaml") -> AppConfig:
+def load_config(path: str | Path = "config/config.yaml") -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"config file not found: {config_path}")
@@ -176,7 +177,7 @@ def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesCo
     rules_path = str(keywords_data.get("rules_path") or "").strip()
     if keywords_enabled and not rules_path:
         raise ConfigError("sources.keywords.rules_path is required when keyword source is enabled")
-    if rules_path and base_path is not None:
+    if rules_path and base_path is not None and not _is_url(rules_path):
         path = Path(rules_path)
         if not path.is_absolute():
             rules_path = str(Path(base_path) / path)
@@ -312,6 +313,11 @@ def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{name} must be a boolean")
     return value
+
+
+def _is_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _validate_time(value: str) -> None:

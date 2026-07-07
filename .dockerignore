@@ -17,3 +17,6 @@ node_modules/
 rednote2tg.egg-info/
 tests/
 config.yaml
+keyword_rules.yaml
+config/config.yaml
+config/keyword_rules.yaml

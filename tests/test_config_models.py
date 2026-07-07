@@ -8,6 +8,8 @@ from rednote2tg.config import ConfigError, load_config, parse_config
 from rednote2tg.models import MediaType, SourceRef
 from rednote2tg.xhs_source import normalize_note
 
+RULES_URL = "https://example.com/xhs_keyword_rules.yaml"
+
 
 def base_config():
     return {
@@ -127,8 +129,19 @@ class ConfigModelsTest(unittest.TestCase):
 
         self.assertEqual(config.sources.keywords.rules_path, str(Path(tmp) / "keyword_rules.yaml"))
 
+    def test_load_config_keeps_keyword_rules_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            data["sources"]["keywords"]["rules_path"] = RULES_URL
+            path = Path(tmp) / "config.yaml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+            config = load_config(path)
+
+        self.assertEqual(config.sources.keywords.rules_path, RULES_URL)
+
     def test_config_example_is_valid(self):
-        config = load_config(Path(__file__).resolve().parents[1] / "config.example.yaml")
+        config = load_config(Path(__file__).resolve().parents[1] / "config" / "config.example.yaml")
 
         self.assertEqual(config.logging.file_path, "logs/rednote2tg.log")
 

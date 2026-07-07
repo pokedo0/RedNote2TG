@@ -10,7 +10,8 @@ xhs:
 sources:
   keywords:
     enabled: true
-    rules_path: "keyword_rules.yaml"
+    # Uses config/keyword_rules.example.yaml when present; otherwise fetches this URL.
+    rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules.yaml"
     search_limit_per_query: 20
     sort_type: 0
     note_type: 0

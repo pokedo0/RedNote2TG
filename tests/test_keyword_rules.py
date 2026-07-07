@@ -1,6 +1,10 @@
+import urllib.error
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import yaml
 
 from rednote2tg.keyword_rules import KeywordRuleError, describe_note_time, generate_keyword_query, load_keyword_rules, parse_keyword_rules
 
@@ -29,6 +33,21 @@ class FakeRandom:
 
     def choice(self, values):
         return values[0]
+
+
+class FakeResponse:
+    def __init__(self, text, status=200):
+        self.text = text
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.text.encode("utf-8")
 
 
 class KeywordRulesTest(unittest.TestCase):
@@ -65,6 +84,44 @@ time_weights:
             rules = load_keyword_rules(path)
 
         self.assertEqual(generate_keyword_query(rules).query, "高跟 水晶 白色")
+
+    def test_loads_rules_from_url(self):
+        with TemporaryDirectory() as tmp:
+            override_path = Path(tmp) / "keyword_rules.yaml"
+            response = FakeResponse(yaml.safe_dump(base_rules(), allow_unicode=True))
+
+            with patch("rednote2tg.keyword_rules.LOCAL_RULES_OVERRIDE_PATH", override_path), patch(
+                "rednote2tg.keyword_rules.urllib.request.urlopen",
+                return_value=response,
+            ) as urlopen:
+                rules = load_keyword_rules("https://example.com/rules.yaml")
+
+        self.assertEqual(generate_keyword_query(rules).query, "高跟 水晶 白色")
+        urlopen.assert_called_once()
+
+    def test_local_rules_override_url(self):
+        with TemporaryDirectory() as tmp:
+            override_path = Path(tmp) / "keyword_rules.yaml"
+            override_path.write_text(yaml.safe_dump(base_rules(), allow_unicode=True), encoding="utf-8")
+
+            with patch("rednote2tg.keyword_rules.LOCAL_RULES_OVERRIDE_PATH", override_path), patch(
+                "rednote2tg.keyword_rules.urllib.request.urlopen",
+                side_effect=AssertionError("remote should not be fetched"),
+            ):
+                rules = load_keyword_rules("https://example.com/rules.yaml")
+
+        self.assertEqual(generate_keyword_query(rules).query, "高跟 水晶 白色")
+
+    def test_remote_rules_failure_raises_rule_error(self):
+        with TemporaryDirectory() as tmp:
+            override_path = Path(tmp) / "keyword_rules.yaml"
+
+            with patch("rednote2tg.keyword_rules.LOCAL_RULES_OVERRIDE_PATH", override_path), patch(
+                "rednote2tg.keyword_rules.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("offline"),
+            ):
+                with self.assertRaises(KeywordRuleError):
+                    load_keyword_rules("https://example.com/rules.yaml")
 
     def test_rejects_bad_weight_sum(self):
         data = base_rules()

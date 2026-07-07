@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debug tool: generate keyword queries from keyword_rules.yaml and print them.
+"""Debug tool: generate keyword queries from local or remote keyword rules and print them.
 
 Usage:
     python tests/debug/keyword_gen.py
@@ -15,6 +15,8 @@ from rednote2tg.keyword_rules import (
     load_keyword_rules,
 )
 
+RULES_URL = "https://gist.github.com/pokedo0/a917d3642838c36e32fda292fc291078/raw/5953718ec0cb432ccbe598017581501416f0de90/xhs_keyword_rules.yaml"
+
 
 def visual_pad(text: str, width: int, align: str = "left") -> str:
     """Pad string considering double-width (CJK) characters."""
@@ -29,12 +31,14 @@ def visual_pad(text: str, width: int, align: str = "left") -> str:
 def main() -> None:
     # 默认直接生成 20 次，无需任何参数或交互输入
     count = 20
-    rules_path = Path(__file__).resolve().parent.parent.parent / "keyword_rules.yaml"
-    rules = load_keyword_rules(rules_path)
+    root = Path(__file__).resolve().parent.parent.parent
+    local_rules_path = root / "config" / "keyword_rules.yaml"
+    rules_source = str(local_rules_path) if local_rules_path.exists() else RULES_URL
+    rules = load_keyword_rules(rules_source)
 
     print(f"\n{'='*80}")
     print(f"  keyword query generator debug")
-    print(f"  rules file : {rules_path}")
+    print(f"  rules file : {rules_source}")
     print(f"  count      : {count}")
     print(f"{'='*80}")
 

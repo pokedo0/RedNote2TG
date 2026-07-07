@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import random
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlparse
 
 import yaml
 
@@ -49,21 +52,51 @@ NOTE_TIME_LABELS = {
 }
 
 _WEIGHT_TOLERANCE = 0.000001
+LOCAL_RULES_OVERRIDE_PATH = Path("config/keyword_rules.yaml")
 
 
 def load_keyword_rules(path: str | Path) -> KeywordRules:
-    rules_path = Path(path)
-    if not rules_path.exists():
-        raise KeywordRuleError(f"keyword rules file not found: {rules_path}")
-
     try:
-        data = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(_read_keyword_rules_text(path)) or {}
     except yaml.YAMLError as exc:
         raise KeywordRuleError(f"keyword rules YAML is invalid: {exc}") from exc
 
     if not isinstance(data, dict):
         raise KeywordRuleError("keyword rules root must be a mapping")
     return parse_keyword_rules(data)
+
+
+def _read_keyword_rules_text(path: str | Path) -> str:
+    if _is_url(path):
+        if LOCAL_RULES_OVERRIDE_PATH.exists():
+            return LOCAL_RULES_OVERRIDE_PATH.read_text(encoding="utf-8")
+        return _read_remote_keyword_rules(str(path))
+
+    rules_path = Path(path)
+    if not rules_path.exists():
+        raise KeywordRuleError(f"keyword rules file not found: {rules_path}")
+    return rules_path.read_text(encoding="utf-8")
+
+
+def _read_remote_keyword_rules(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "RedNote2TG/0.1"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = getattr(response, "status", 200)
+            if status < 200 or status >= 300:
+                raise KeywordRuleError(f"keyword rules URL returned HTTP {status}: {url}")
+            return response.read().decode("utf-8")
+    except KeywordRuleError:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise KeywordRuleError(f"keyword rules URL returned HTTP {exc.code}: {url}") from exc
+    except (OSError, urllib.error.URLError, UnicodeDecodeError) as exc:
+        raise KeywordRuleError(f"keyword rules URL fetch failed: {url}: {exc}") from exc
+
+
+def _is_url(path: str | Path) -> bool:
+    parsed = urlparse(str(path))
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def parse_keyword_rules(data: Mapping[str, Any]) -> KeywordRules:

@@ -6,12 +6,12 @@ from rednote2tg.config import load_config
 from rednote2tg.db import NoteStore
 from rednote2tg.logging import configure_logging
 from rednote2tg.media import MediaDownloader
-from rednote2tg.scheduler import PublishJobRunner, create_scheduler, register_handlers
+from rednote2tg.scheduler import PublishJobRunner, RuntimeState, create_scheduler, register_handlers
 from rednote2tg.telegram_publisher import TelegramPublisher
 from rednote2tg.xhs_source import XhsSource
 
 
-async def async_main(config_path: str = "config.yaml") -> None:
+async def async_main(config_path: str = "config/config.yaml") -> None:
     config = load_config(config_path)
     configure_logging(config.logging)
 
@@ -29,8 +29,10 @@ async def async_main(config_path: str = "config.yaml") -> None:
         retry_after_padding_seconds=config.publishing.telegram_retry_after_padding_seconds,
     )
     runner = PublishJobRunner(config, source, store, downloader, publisher)
-    scheduler = create_scheduler(config, runner)
-    register_handlers(dispatcher, runner, store, scheduler, config.telegram.admin_user_ids, config_path)
+    state = RuntimeState(config, runner, store, None, config_path)
+    scheduler = create_scheduler(config, state)
+    state.scheduler = scheduler
+    register_handlers(dispatcher, state)
 
     scheduler.start()
     from aiogram.types import BotCommand
@@ -42,6 +44,7 @@ async def async_main(config_path: str = "config.yaml") -> None:
         BotCommand(command="note", description="私聊抓取一个小红书笔记链接"),
         BotCommand(command="ping", description="检测小红书Cookie是否有效"),
         BotCommand(command="update_cookie", description="更新小红书Cookie"),
+        BotCommand(command="reload", description="热加载采集配置"),
     ])
     try:
         await dispatcher.start_polling(bot)

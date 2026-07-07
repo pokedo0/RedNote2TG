@@ -16,23 +16,23 @@ pip install -e .
 Copy the example config:
 
 ```powershell
-Copy-Item config.example.yaml config.yaml
+Copy-Item config/config.example.yaml config/config.yaml
 ```
 
-Edit `config.yaml`:
+Edit `config/config.yaml`:
 
 - `telegram.bot_token`: token from BotFather.
 - `telegram.channel_id`: channel username such as `@your_channel`.
 - `telegram.admin_user_ids`: Telegram user IDs allowed to use `/status` and `/run_once`; empty means all users are allowed.
 - `xhs.cookies`: Xiaohongshu browser cookies.
-- `sources.keywords`: keyword search configuration.
+- `sources.keywords`: keyword search configuration. Remote `rules_path` is supported; if `config/keyword_rules.yaml` exists, it overrides the remote rules for local testing.
 - `sources.homefeed`: homefeed recommendation configuration.
 - `publishing.notes_per_run`: total notes to publish per scheduled run.
 - `logging`: console and persistent file logging. By default logs are written to `logs/rednote2tg.log`, rotated at 5 MB, compressed after rotation, and cleaned after 14 days or 20 rotated files.
 - `dedup.ttl_days`: short-term dedup window, 7 to 14 days.
 - `schedule.interval_minutes`: publish interval in `schedule.timezone`.
 
-`config.yaml` is ignored by git because it contains secrets.
+`config/config.yaml` and `config/keyword_rules.yaml` are ignored by git because they contain local runtime data.
 
 ## Telegram channel permissions
 
@@ -48,6 +48,7 @@ Useful bot commands:
 
 - `/status`: show scheduler and recent publish status.
 - `/run_once`: trigger one publish job manually.
+- `/reload`: reload supported crawl config and keyword rules without restarting.
 
 ## Behavior
 
