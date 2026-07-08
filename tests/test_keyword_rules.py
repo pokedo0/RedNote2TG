@@ -59,6 +59,26 @@ class KeywordRulesTest(unittest.TestCase):
         self.assertEqual(query.query, "高跟 水晶 白色")
         self.assertEqual(query.note_time, 3)
 
+    def test_allows_single_term_keyword_rules(self):
+        data = {
+            "joiner": " ",
+            "length_weights": {1: 1.0},
+            "required_pools": [["仙女", "女神"]],
+            "optional_groups": {
+                "attributes": {
+                    "weight": 1.0,
+                    "pools": ["蕾丝"],
+                },
+            },
+            "time_weights": {"unlimited": 1.0},
+        }
+        rules = parse_keyword_rules(data)
+
+        query = generate_keyword_query(rules)
+
+        self.assertIn(query.query, {"仙女", "女神"})
+        self.assertEqual(query.note_time, 0)
+
     def test_loads_rules_from_yaml_file(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "keyword_rules.yaml"
@@ -112,6 +132,23 @@ time_weights:
 
         self.assertEqual(generate_keyword_query(rules).query, "高跟 水晶 白色")
 
+    def test_can_disable_local_rules_override_for_url(self):
+        with TemporaryDirectory() as tmp:
+            override_path = Path(tmp) / "keyword_rules.yaml"
+            override_path.write_text(yaml.safe_dump(base_rules(), allow_unicode=True), encoding="utf-8")
+            remote_rules = base_rules()
+            remote_rules["required_pools"] = [["凉鞋"], ["水晶"]]
+            response = FakeResponse(yaml.safe_dump(remote_rules, allow_unicode=True))
+
+            with patch("rednote2tg.keyword_rules.LOCAL_RULES_OVERRIDE_PATH", override_path), patch(
+                "rednote2tg.keyword_rules.urllib.request.urlopen",
+                return_value=response,
+            ) as urlopen:
+                rules = load_keyword_rules("https://example.com/rules.yaml", allow_local_override=False)
+
+        self.assertEqual(generate_keyword_query(rules).query, "凉鞋 水晶 白色")
+        urlopen.assert_called_once()
+
     def test_remote_rules_failure_raises_rule_error(self):
         with TemporaryDirectory() as tmp:
             override_path = Path(tmp) / "keyword_rules.yaml"
@@ -132,7 +169,7 @@ time_weights:
 
     def test_rejects_length_outside_supported_range(self):
         data = base_rules()
-        data["length_weights"] = {2: 1.0}
+        data["length_weights"] = {0: 1.0}
 
         with self.assertRaises(KeywordRuleError):
             parse_keyword_rules(data)

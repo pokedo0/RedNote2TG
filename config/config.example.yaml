@@ -10,8 +10,15 @@ xhs:
 sources:
   keywords:
     enabled: true
-    # Uses config/keyword_rules.example.yaml when present; otherwise fetches this URL.
-    rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules.yaml"
+    # Legacy single-rule mode still works:
+    # rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules.yaml"
+    rules:
+      - name: "A"
+        weight: 0.7
+        rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules_A.yaml"
+      - name: "B"
+        weight: 0.3
+        rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules_B.yaml"
     search_limit_per_query: 20
     sort_type: 0
     note_type: 0

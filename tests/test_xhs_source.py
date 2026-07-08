@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from rednote2tg.config import HomefeedSourceConfig, KeywordSourceConfig, SourcesConfig, XhsConfig
+from rednote2tg.config import HomefeedSourceConfig, KeywordRuleSourceConfig, KeywordSourceConfig, SourcesConfig, XhsConfig
 from rednote2tg.xhs_source import XhsSource
 
 
@@ -39,6 +39,17 @@ class FakeXhsClient:
         }
 
 
+class DeterministicRandom:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def random(self):
+        return next(self.values)
+
+    def choice(self, values):
+        return values[0]
+
+
 def write_rules(directory: str) -> str:
     path = Path(directory) / "keyword_rules.yaml"
     path.write_text(
@@ -62,10 +73,49 @@ time_weights:
     return str(path)
 
 
+def write_named_rules(directory: str, filename: str, required_prefix: str, time_key: str) -> str:
+    path = Path(directory) / filename
+    path.write_text(
+        f"""
+joiner: " "
+length_weights:
+  3: 1.0
+required_pools:
+  - ["{required_prefix}1"]
+  - ["{required_prefix}2"]
+optional_groups:
+  only:
+    weight: 1.0
+    pools:
+      - "{required_prefix}3"
+time_weights:
+  {time_key}: 1.0
+""".strip(),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
 def source_config(rules_path: str):
     return SourcesConfig(
         keywords=KeywordSourceConfig(True, rules_path, 5, 1, 2),
         homefeed=HomefeedSourceConfig(True, ("home",), 3),
+    )
+
+
+def weighted_source_config(rules_a_path: str, rules_b_path: str):
+    return SourcesConfig(
+        keywords=KeywordSourceConfig(
+            enabled=True,
+            search_limit_per_query=5,
+            sort_type=1,
+            note_type=2,
+            rules=(
+                KeywordRuleSourceConfig("A", 0.7, rules_a_path),
+                KeywordRuleSourceConfig("B", 0.3, rules_b_path),
+            ),
+        ),
+        homefeed=HomefeedSourceConfig(False, (), 3),
     )
 
 
@@ -109,6 +159,27 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(errors[0].source_key, "generated")
         self.assertEqual([call[0] for call in client.calls], ["homefeed"])
         self.assertEqual([note.source.source_type for note in notes], ["homefeed"])
+
+    def test_weighted_rules_select_b_and_search_once(self):
+        with TemporaryDirectory() as tmp:
+            rules_a = write_named_rules(tmp, "keyword_rules_A.yaml", "a", "one_week")
+            rules_b = write_named_rules(tmp, "keyword_rules_B.yaml", "b", "half_year")
+            client = FakeXhsClient()
+            source = XhsSource(
+                XhsConfig("cookie"),
+                weighted_source_config(rules_a, rules_b),
+                client=client,
+                rng=DeterministicRandom([0.8, 0.0, 0.0, 0.0]),
+            )
+
+            notes, errors = source.collect()
+
+        self.assertEqual(errors, [])
+        self.assertEqual([call[0] for call in client.calls], ["search"])
+        self.assertEqual(client.calls[0], ("search", "b1 b2 b3", 5, 1, 2, 3, True))
+        self.assertEqual(source.last_keyword_rule_name, "B")
+        self.assertEqual(source.last_keyword_query.query, "b1 b2 b3")
+        self.assertEqual([note.source.source_type for note in notes], ["keyword"])
 
     def test_fetch_note_url_normalizes_single_manual_note(self):
         client = FakeXhsClient()

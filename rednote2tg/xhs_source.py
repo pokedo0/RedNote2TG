@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any, Protocol
 
-from rednote2tg.config import SourcesConfig, XhsConfig
+from rednote2tg.config import KeywordRuleSourceConfig, SourcesConfig, XhsConfig
 from rednote2tg.keyword_rules import KeywordRuleError, generate_keyword_query, load_keyword_rules
 from rednote2tg.models import MediaItem, MediaType, Note, SourceError, SourceRef
 
@@ -38,10 +39,13 @@ class XhsSource:
         xhs_config: XhsConfig,
         sources_config: SourcesConfig,
         client: XhsClientProtocol | None = None,
+        rng: random.Random | None = None,
     ):
         self.sources_config = sources_config
         self.client = client or self._create_client(xhs_config)
+        self.rng = rng or random.Random()
         self.last_keyword_query = None
+        self.last_keyword_rule_name = ""
 
     @staticmethod
     def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol:
@@ -53,15 +57,22 @@ class XhsSource:
         notes: list[Note] = []
         errors: list[SourceError] = []
         self.last_keyword_query = None
+        self.last_keyword_rule_name = ""
 
         if self.sources_config.keywords.enabled:
             try:
-                keyword_query = generate_keyword_query(load_keyword_rules(self.sources_config.keywords.rules_path))
+                rule_source = self._select_keyword_rule_source()
+                rules_path = rule_source.rules_path if rule_source is not None else self.sources_config.keywords.rules_path
+                keyword_query = generate_keyword_query(
+                    load_keyword_rules(rules_path, allow_local_override=rule_source is None),
+                    self.rng,
+                )
             except KeywordRuleError as exc:
                 logger.error("keyword rules failed: %s", exc)
                 errors.append(SourceError("keyword", "generated", str(exc)))
             else:
                 self.last_keyword_query = keyword_query
+                self.last_keyword_rule_name = rule_source.name if rule_source is not None else ""
                 try:
                     items = self.client.search_notes(
                         keyword_query.query,
@@ -90,6 +101,18 @@ class XhsSource:
                     errors.append(SourceError("homefeed", category, str(exc)))
 
         return notes, errors
+
+    def _select_keyword_rule_source(self) -> KeywordRuleSourceConfig | None:
+        rules = self.sources_config.keywords.rules
+        if not rules:
+            return None
+        threshold = self.rng.random()
+        cumulative = 0.0
+        for rule in rules:
+            cumulative += rule.weight
+            if threshold <= cumulative:
+                return rule
+        return rules[-1]
 
     def _normalize_many(self, items: list[dict[str, Any]], source: SourceRef) -> list[Note]:
         normalized = []

@@ -30,9 +30,10 @@ from rednote2tg.scheduler import (
 
 
 class FakeSource:
-    def __init__(self, notes, keyword_query=None):
+    def __init__(self, notes, keyword_query=None, keyword_rule_name=""):
         self.notes = notes
         self.last_keyword_query = keyword_query
+        self.last_keyword_rule_name = keyword_rule_name
         self.fetched_urls = []
 
     def collect(self):
@@ -512,7 +513,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("\n  source_collected notes=1 errors=0", authorized.answers[0])
             self.assertIn("\n  publish published=1(media=0) skipped=0 failed=0(media=0) source_errors=0", authorized.answers[0])
             self.assertIn("elapsed=", authorized.answers[0])
-            self.assertIn("keyword query=- time_filter=-", authorized.answers[0])
+            self.assertIn("keyword rule=- query=- time_filter=-", authorized.answers[0])
             self.assertNotIn("keyword_note_time", authorized.answers[0])
             store.close()
 
@@ -552,8 +553,27 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
             await handle_run_once(message, runner, ())
 
-            self.assertIn("keyword query=凉鞋 水晶 白色 time_filter=一周内", message.answers[0])
+            self.assertIn("keyword rule=- query=凉鞋 水晶 白色 time_filter=一周内", message.answers[0])
             self.assertNotIn("keyword_note_time", message.answers[0])
+            store.close()
+
+    async def test_run_once_reports_selected_keyword_rule(self):
+        config = parse_config(base_config())
+        keyword_query = SimpleNamespace(query="凉鞋 水晶 白色", note_time=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1")], keyword_query=keyword_query, keyword_rule_name="B"),
+                store,
+                FakeDownloader(),
+                FakePublisher(),
+            )
+
+            result = await runner.run_once()
+
+            self.assertEqual(result["keyword_rule"], "B")
+            self.assertIn("keyword rule=B query=凉鞋 水晶 白色", format_run_once_summary(result))
             store.close()
 
     async def test_status_command_reports_summary(self):
@@ -695,6 +715,39 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("热加载失败", message.answers[0])
             self.assertEqual(state.runner.config.publishing.notes_per_run, 3)
+            store.close()
+
+    async def test_reload_rejects_invalid_weighted_keyword_rules_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(root / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+
+            valid_rules_path = root / "keyword_rules_A.yaml"
+            bad_rules_path = root / "keyword_rules_B.yaml"
+            valid_rules_path.write_text(yaml.safe_dump(base_rules(), allow_unicode=True), encoding="utf-8")
+            bad_rules_path.write_text(yaml.safe_dump({"length_weights": {3: 1.0}}, allow_unicode=True), encoding="utf-8")
+            data["sources"]["keywords"] = {
+                "enabled": True,
+                "rules": [
+                    {"name": "A", "weight": 0.7, "rules_path": "keyword_rules_A.yaml"},
+                    {"name": "B", "weight": 0.3, "rules_path": "keyword_rules_B.yaml"},
+                ],
+                "search_limit_per_query": 20,
+            }
+            data["publishing"]["notes_per_run"] = 7
+            config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+            message = FakeMessage(1)
+
+            await handle_reload(message, state)
+
+            self.assertIn("热加载失败", message.answers[0])
+            self.assertEqual(state.runner.config.publishing.notes_per_run, 3)
+            self.assertEqual(state.config.sources.keywords.rules_path, str(root / "keyword_rules.yaml"))
             store.close()
 
     async def test_reload_rejects_restart_only_config_without_mutation(self):

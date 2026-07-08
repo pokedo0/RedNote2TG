@@ -1,0 +1,34 @@
+joiner: " "
+
+length_weights:
+  1: 0.1
+  2: 0.55
+  3: 0.35
+
+required_pools:
+  - ["仙女", "女神", "姐", "人妻", "御姐", "熟女", "小妈", "妈妈" ,"少妇" ,"少女", "妹妹"]
+
+optional_groups:
+  attributes:
+    weight: 0.5
+    pools:
+      - ["蕾丝", "透明", "水钻","美甲", "紫色", "闪 bling"]
+      - ["欲系", "欲"]
+      - ["露脚", "肉腿"]
+      - ["裙", "碎花", "包臂裙", "#ol"]
+
+  long_tail:
+    weight: 0.5
+    pools:
+      - ["穿搭", "搭配", "ootd"]
+      - ["韵味","温柔"]
+      - "蹲姿"
+      - "氛围感"
+      - "夏日"
+      - "风情"
+
+
+time_weights:
+  unlimited: 0.55
+  half_year: 0.35
+  one_week: 0.10

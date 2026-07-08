@@ -9,6 +9,8 @@ from rednote2tg.models import MediaType, SourceRef
 from rednote2tg.xhs_source import normalize_note
 
 RULES_URL = "https://example.com/xhs_keyword_rules.yaml"
+RULES_A_URL = "https://example.com/xhs_keyword_rules_A.yaml"
+RULES_B_URL = "https://example.com/xhs_keyword_rules_B.yaml"
 
 
 def base_config():
@@ -149,6 +151,41 @@ class ConfigModelsTest(unittest.TestCase):
 
         self.assertEqual(config.sources.keywords.rules_path, RULES_URL)
 
+    def test_parse_config_accepts_weighted_keyword_rules(self):
+        data = base_config()
+        keywords = data["sources"]["keywords"]
+        del keywords["rules_path"]
+        keywords["rules"] = [
+            {"name": "A", "weight": 0.7, "rules_path": RULES_A_URL},
+            {"name": "B", "weight": 0.3, "rules_path": RULES_B_URL},
+        ]
+
+        config = parse_config(data)
+
+        self.assertEqual(config.sources.keywords.rules_path, "")
+        self.assertEqual([rule.name for rule in config.sources.keywords.rules], ["A", "B"])
+        self.assertEqual([rule.weight for rule in config.sources.keywords.rules], [0.7, 0.3])
+        self.assertEqual([rule.rules_path for rule in config.sources.keywords.rules], [RULES_A_URL, RULES_B_URL])
+
+    def test_load_config_resolves_weighted_rules_paths_relative_to_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            keywords = data["sources"]["keywords"]
+            del keywords["rules_path"]
+            keywords["rules"] = [
+                {"name": "A", "weight": 0.7, "rules_path": "keyword_rules_A.yaml"},
+                {"name": "B", "weight": 0.3, "rules_path": "keyword_rules_B.yaml"},
+            ]
+            path = Path(tmp) / "config.yaml"
+            path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+            config = load_config(path)
+
+        self.assertEqual(
+            [rule.rules_path for rule in config.sources.keywords.rules],
+            [str(Path(tmp) / "keyword_rules_A.yaml"), str(Path(tmp) / "keyword_rules_B.yaml")],
+        )
+
     def test_config_example_is_valid(self):
         config = load_config(Path(__file__).resolve().parents[1] / "config" / "config.example.yaml")
 
@@ -160,6 +197,40 @@ class ConfigModelsTest(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             parse_config(data)
+
+    def test_rejects_keyword_rules_path_with_weighted_rules(self):
+        data = base_config()
+        data["sources"]["keywords"]["rules"] = [
+            {"name": "A", "weight": 0.7, "rules_path": RULES_A_URL},
+            {"name": "B", "weight": 0.3, "rules_path": RULES_B_URL},
+        ]
+
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_rejects_bad_weighted_keyword_rules(self):
+        invalid_rules = [
+            [
+                {"name": "A", "weight": 0.5, "rules_path": RULES_A_URL},
+                {"name": "B", "weight": 0.3, "rules_path": RULES_B_URL},
+            ],
+            [
+                {"name": "A", "weight": 0.7, "rules_path": RULES_A_URL},
+                {"name": "A", "weight": 0.3, "rules_path": RULES_B_URL},
+            ],
+            [
+                {"name": "A", "weight": 1.0, "rules_path": RULES_A_URL},
+                {"name": "B", "weight": 0, "rules_path": RULES_B_URL},
+            ],
+        ]
+        for rules in invalid_rules:
+            data = base_config()
+            keywords = data["sources"]["keywords"]
+            del keywords["rules_path"]
+            keywords["rules"] = rules
+            with self.subTest(rules=rules):
+                with self.assertRaises(ConfigError):
+                    parse_config(data)
 
     def test_rejects_bad_notes_per_run(self):
         data = base_config()

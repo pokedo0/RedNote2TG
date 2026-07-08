@@ -140,6 +140,7 @@ class PublishJobRunner:
 
         elapsed_seconds = perf_counter() - started_at
         keyword_query = getattr(self.source, "last_keyword_query", None)
+        keyword_rule = getattr(self.source, "last_keyword_rule_name", "")
         summary: dict[str, Any] = {
             "published": published,
             "published_media": published_media,
@@ -151,6 +152,7 @@ class PublishJobRunner:
             "source_collected_errors": len(errors),
             "elapsed_seconds": elapsed_seconds,
             "keyword_query": keyword_query.query if keyword_query is not None else "",
+            "keyword_rule": keyword_rule,
             "keyword_note_time": keyword_query.note_time if keyword_query is not None else None,
             "keyword_time_filter": describe_note_time(keyword_query.note_time if keyword_query is not None else None),
             "telegram_retry_after_count": max(
@@ -330,7 +332,7 @@ def format_run_once_summary(result: dict[str, Any]) -> str:
         f"  publish published={result['published']}(media={result.get('published_media', 0)}) "
         f"skipped={result['skipped']} failed={result['failed']}(media={result.get('failed_media', 0)}) "
         f"source_errors={result['source_errors']}\n"
-        f"  keyword query={result['keyword_query'] or '-'} time_filter={result['keyword_time_filter']}\n"
+        f"  keyword rule={result.get('keyword_rule') or '-'} query={result['keyword_query'] or '-'} time_filter={result['keyword_time_filter']}\n"
         f"  TelegramRetryAfter count={result.get('telegram_retry_after_count', 0)}\n"
         f"  elapsed={result['elapsed_seconds']:.3f}s"
     )
@@ -580,13 +582,25 @@ async def handle_reload(message, state: RuntimeState) -> None:
     await message.answer(
         "✅ 配置已热加载\n"
         f"{_format_schedule_status(state.config)}\n"
-        f"keyword_rules={state.config.sources.keywords.rules_path or '-'}"
+        f"keyword_rules={_format_keyword_rules_status(state.config)}"
     )
 
 
 def _validate_reload_config(config: AppConfig) -> None:
     if config.sources.keywords.enabled:
-        load_keyword_rules(config.sources.keywords.rules_path)
+        keyword_config = config.sources.keywords
+        if keyword_config.rules:
+            for rule in keyword_config.rules:
+                load_keyword_rules(rule.rules_path, allow_local_override=False)
+            return
+        load_keyword_rules(keyword_config.rules_path)
+
+
+def _format_keyword_rules_status(config: AppConfig) -> str:
+    keyword_config = config.sources.keywords
+    if keyword_config.rules:
+        return ",".join(f"{rule.name}:{rule.rules_path}" for rule in keyword_config.rules)
+    return keyword_config.rules_path or "-"
 
 
 def _unsupported_reload_changes(old: AppConfig, new: AppConfig) -> list[str]:

@@ -55,9 +55,9 @@ _WEIGHT_TOLERANCE = 0.000001
 LOCAL_RULES_OVERRIDE_PATH = Path("config/keyword_rules.yaml")
 
 
-def load_keyword_rules(path: str | Path) -> KeywordRules:
+def load_keyword_rules(path: str | Path, *, allow_local_override: bool = True) -> KeywordRules:
     try:
-        data = yaml.safe_load(_read_keyword_rules_text(path)) or {}
+        data = yaml.safe_load(_read_keyword_rules_text(path, allow_local_override=allow_local_override)) or {}
     except yaml.YAMLError as exc:
         raise KeywordRuleError(f"keyword rules YAML is invalid: {exc}") from exc
 
@@ -66,9 +66,9 @@ def load_keyword_rules(path: str | Path) -> KeywordRules:
     return parse_keyword_rules(data)
 
 
-def _read_keyword_rules_text(path: str | Path) -> str:
+def _read_keyword_rules_text(path: str | Path, *, allow_local_override: bool) -> str:
     if _is_url(path):
-        if LOCAL_RULES_OVERRIDE_PATH.exists():
+        if allow_local_override and LOCAL_RULES_OVERRIDE_PATH.exists():
             return LOCAL_RULES_OVERRIDE_PATH.read_text(encoding="utf-8")
         return _read_remote_keyword_rules(str(path))
 
@@ -102,8 +102,8 @@ def _is_url(path: str | Path) -> bool:
 def parse_keyword_rules(data: Mapping[str, Any]) -> KeywordRules:
     joiner = str(data.get("joiner", " "))
     length_weights = _parse_int_weights(data.get("length_weights"), "length_weights")
-    if any(length < 3 or length > 6 for length in length_weights):
-        raise KeywordRuleError("length_weights keys must be between 3 and 6")
+    if any(length < 1 or length > 6 for length in length_weights):
+        raise KeywordRuleError("length_weights keys must be between 1 and 6")
 
     required_pools = tuple(
         _parse_term_pool(pool, f"required_pools[{index}]")

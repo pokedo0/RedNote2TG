@@ -27,12 +27,20 @@ class XhsConfig:
 
 
 @dataclass(frozen=True)
+class KeywordRuleSourceConfig:
+    name: str
+    weight: float
+    rules_path: str
+
+
+@dataclass(frozen=True)
 class KeywordSourceConfig:
     enabled: bool = True
     rules_path: str = ""
     search_limit_per_query: int = 20
     sort_type: int = 0
     note_type: int = 0
+    rules: tuple[KeywordRuleSourceConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -176,18 +184,19 @@ def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesCo
     homefeed_data = data.get("homefeed") or {}
     keywords_enabled = bool(keywords_data.get("enabled", True))
     rules_path = str(keywords_data.get("rules_path") or "").strip()
-    if keywords_enabled and not rules_path:
-        raise ConfigError("sources.keywords.rules_path is required when keyword source is enabled")
-    if rules_path and base_path is not None and not _is_url(rules_path):
-        path = Path(rules_path)
-        if not path.is_absolute():
-            rules_path = str(Path(base_path) / path)
+    rules = _parse_keyword_rule_sources(keywords_data.get("rules"), base_path)
+    if rules_path and rules:
+        raise ConfigError("sources.keywords.rules_path cannot be used with sources.keywords.rules")
+    if keywords_enabled and not rules_path and not rules:
+        raise ConfigError("sources.keywords.rules_path or sources.keywords.rules is required when keyword source is enabled")
+    rules_path = _resolve_optional_path(rules_path, base_path)
     keywords = KeywordSourceConfig(
         enabled=keywords_enabled,
         rules_path=rules_path,
         search_limit_per_query=_positive_int(keywords_data.get("search_limit_per_query", 20), "sources.keywords.search_limit_per_query"),
         sort_type=int(keywords_data.get("sort_type", 0)),
         note_type=int(keywords_data.get("note_type", 0)),
+        rules=rules,
     )
     homefeed = HomefeedSourceConfig(
         enabled=bool(homefeed_data.get("enabled", False)),
@@ -195,6 +204,48 @@ def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesCo
         limit_per_category=_positive_int(homefeed_data.get("limit_per_category", 20), "sources.homefeed.limit_per_category"),
     )
     return SourcesConfig(keywords=keywords, homefeed=homefeed)
+
+
+def _parse_keyword_rule_sources(value: object, base_path: str | Path | None) -> tuple[KeywordRuleSourceConfig, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError("sources.keywords.rules must be a list")
+    if not value:
+        raise ConfigError("sources.keywords.rules must contain at least one rule")
+
+    rules: list[KeywordRuleSourceConfig] = []
+    names: set[str] = set()
+    total_weight = 0.0
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ConfigError(f"sources.keywords.rules[{index}] must be a mapping")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ConfigError(f"sources.keywords.rules[{index}].name is required")
+        if name in names:
+            raise ConfigError(f"sources.keywords.rules name is duplicated: {name}")
+        names.add(name)
+
+        weight = _positive_float(item.get("weight"), f"sources.keywords.rules[{index}].weight")
+        rules_path = str(item.get("rules_path") or "").strip()
+        if not rules_path:
+            raise ConfigError(f"sources.keywords.rules[{index}].rules_path is required")
+        rules_path = _resolve_optional_path(rules_path, base_path)
+        rules.append(KeywordRuleSourceConfig(name=name, weight=weight, rules_path=rules_path))
+        total_weight += weight
+
+    if abs(total_weight - 1.0) > 0.000001:
+        raise ConfigError("sources.keywords.rules weights must sum to 1.0")
+    return tuple(rules)
+
+
+def _resolve_optional_path(value: str, base_path: str | Path | None) -> str:
+    if value and base_path is not None and not _is_url(value):
+        path = Path(value)
+        if not path.is_absolute():
+            return str(Path(base_path) / path)
+    return value
 
 
 def _parse_publishing(data: dict) -> PublishingConfig:
@@ -301,6 +352,16 @@ def _nonnegative_float(value: object, name: str) -> float:
         raise ConfigError(f"{name} must be a number") from exc
     if parsed < 0:
         raise ConfigError(f"{name} must be greater than or equal to zero")
+    return parsed
+
+
+def _positive_float(value: object, name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{name} must be a number") from exc
+    if parsed <= 0:
+        raise ConfigError(f"{name} must be greater than zero")
     return parsed
 
 
