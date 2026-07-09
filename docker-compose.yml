@@ -10,8 +10,6 @@ services:
       TZ: Asia/Shanghai
       NODE_PATH: /app/node_modules
     volumes:
-      - ./config/config.yaml:/app/config/config.yaml:ro
-      # Optional local keyword rules override:
-      # - ./config/keyword_rules.example.yaml:/app/config/keyword_rules.example.yaml:ro
+      - ./config/config.yaml:/app/config/config.yaml
       - ./data:/app/data
       - ./logs:/app/logs
