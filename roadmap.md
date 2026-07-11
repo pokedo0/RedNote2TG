@@ -1,5 +1,19 @@
 # Roadmap
 
+## Pre-Detail Deduplication
+
+Status: Done
+
+Decision:
+- Fetch keyword and homefeed results without details first.
+- Filter active published note IDs before any per-note detail request.
+- Preserve existing source order and publish quota behavior after detail normalization.
+
+Implementation:
+- `PublishJobRunner` passes a snapshot of active dedup IDs into `XhsSource.collect`.
+- `XhsSource` builds detail URLs from list-item IDs and XHS security parameters, then fetches only eligible notes.
+- Logs record pre-detail dedup skips, malformed list items, and per-note detail fetch starts.
+
 ## Keyword A/B Weighted Rule Sources
 
 Status: Done

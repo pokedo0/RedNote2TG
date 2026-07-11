@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 from typing import Any, Protocol
+from urllib.parse import urlencode
 
 from rednote2tg.config import KeywordRuleSourceConfig, SourcesConfig, XhsConfig
 from rednote2tg.keyword_rules import KeywordRuleError, generate_keyword_query, load_keyword_rules
@@ -46,6 +47,7 @@ class XhsSource:
         self.rng = rng or random.Random()
         self.last_keyword_query = None
         self.last_keyword_rule_name = ""
+        self.last_pre_detail_dedup_skipped = 0
 
     @staticmethod
     def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol:
@@ -53,11 +55,13 @@ class XhsSource:
 
         return XhsPcClient(xhs_config.cookies, proxies=xhs_config.proxies)
 
-    def collect(self) -> tuple[list[Note], list[SourceError]]:
+    def collect(self, active_note_ids: set[str] | None = None) -> tuple[list[Note], list[SourceError]]:
         notes: list[Note] = []
         errors: list[SourceError] = []
+        active_note_ids = active_note_ids or set()
         self.last_keyword_query = None
         self.last_keyword_rule_name = ""
+        self.last_pre_detail_dedup_skipped = 0
 
         if self.sources_config.keywords.enabled:
             try:
@@ -80,9 +84,16 @@ class XhsSource:
                         sort_type_choice=self.sources_config.keywords.sort_type,
                         note_type=self.sources_config.keywords.note_type,
                         note_time=keyword_query.note_time,
-                        with_detail=True,
+                        with_detail=False,
                     )
-                    notes.extend(self._normalize_many(items, SourceRef("keyword", keyword_query.query)))
+                    notes.extend(
+                        self._fetch_details_after_dedup(
+                            items,
+                            SourceRef("keyword", keyword_query.query),
+                            active_note_ids,
+                            default_xsec_source="pc_search",
+                        )
+                    )
                 except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
                     logger.exception("keyword source failed: %s", keyword_query.query)
                     errors.append(SourceError("keyword", keyword_query.query, str(exc)))
@@ -93,9 +104,16 @@ class XhsSource:
                     items = self.client.homefeed_notes(
                         category,
                         limit=self.sources_config.homefeed.limit_per_category,
-                        with_detail=True,
+                        with_detail=False,
                     )
-                    notes.extend(self._normalize_many(items, SourceRef("homefeed", category)))
+                    notes.extend(
+                        self._fetch_details_after_dedup(
+                            items,
+                            SourceRef("homefeed", category),
+                            active_note_ids,
+                            default_xsec_source="pc_feed",
+                        )
+                    )
                 except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
                     logger.exception("homefeed source failed: %s", category)
                     errors.append(SourceError("homefeed", category, str(exc)))
@@ -120,6 +138,45 @@ class XhsSource:
             note = normalize_note(item, source)
             if note is not None:
                 normalized.append(note)
+        return normalized
+
+    def _fetch_details_after_dedup(
+        self,
+        items: list[dict[str, Any]],
+        source: SourceRef,
+        active_note_ids: set[str],
+        default_xsec_source: str,
+    ) -> list[Note]:
+        normalized = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                logger.warning(
+                    "note skipped before detail: source=%s key=%s reason=invalid_list_item",
+                    source.source_type,
+                    source.source_key,
+                )
+                continue
+            note_id = _first(item, "note_id", "id", "source_note_id")
+            if not note_id:
+                logger.warning(
+                    "note skipped before detail: source=%s key=%s reason=missing_note_id",
+                    source.source_type,
+                    source.source_key,
+                )
+                continue
+            note_id = str(note_id)
+            if note_id in active_note_ids:
+                self.last_pre_detail_dedup_skipped += 1
+                logger.info("note skipped before detail: note_id=%s reason=active_dedup", note_id)
+                continue
+
+            note_url = _note_url_from_list_item(item, note_id, default_xsec_source)
+            logger.info("note detail fetch started: note_id=%s source=%s", note_id, source.source_type)
+            note = normalize_note(self.client.fetch_note(note_url), source)
+            if note is not None:
+                normalized.append(note)
+            else:
+                logger.warning("note skipped after detail: note_id=%s reason=missing_note_id", note_id)
         return normalized
 
     def fetch_note_url(self, note_url: str) -> Note | None:
@@ -175,3 +232,15 @@ def _first(raw: dict[str, Any], *keys: str) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _note_url_from_list_item(item: dict[str, Any], note_id: str, default_xsec_source: str) -> str:
+    params = {}
+    xsec_token = item.get("xsec_token")
+    if xsec_token:
+        params["xsec_token"] = str(xsec_token)
+    xsec_source = item.get("xsec_source") or default_xsec_source
+    if xsec_source:
+        params["xsec_source"] = str(xsec_source)
+    url = f"https://www.xiaohongshu.com/explore/{note_id}"
+    return f"{url}?{urlencode(params)}" if params else url

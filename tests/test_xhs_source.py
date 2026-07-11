@@ -39,6 +39,28 @@ class FakeXhsClient:
         }
 
 
+class DetailFilteringClient(FakeXhsClient):
+    def __init__(self):
+        super().__init__()
+        self.detail_urls = []
+
+    def search_notes(self, query, limit=20, sort_type_choice=0, note_type=0, note_time=0, with_detail=False):
+        self.calls.append(("search", query, limit, sort_type_choice, note_type, note_time, with_detail))
+        return [
+            {"note_id": "published-1", "xsec_token": "old-token"},
+            {"note_id": "new-1", "xsec_token": "new-token"},
+        ]
+
+    def fetch_note(self, note_url):
+        self.detail_urls.append(note_url)
+        return {
+            "note_id": "new-1",
+            "note_url": note_url,
+            "title": "New note",
+            "image_list": ["https://img/new.jpg"],
+        }
+
+
 class DeterministicRandom:
     def __init__(self, values):
         self.values = iter(values)
@@ -129,8 +151,29 @@ class XhsSourceTest(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertEqual([note.source.source_type for note in notes], ["keyword", "homefeed"])
-        self.assertEqual(client.calls[0], ("search", "a b c", 5, 1, 2, 2, True))
-        self.assertEqual(client.calls[-1], ("homefeed", "home", 3, True))
+        self.assertEqual(client.calls[0], ("search", "a b c", 5, 1, 2, 2, False))
+        self.assertEqual(client.calls[1][0], "fetch_note")
+        self.assertEqual(client.calls[2], ("homefeed", "home", 3, False))
+        self.assertEqual(client.calls[3][0], "fetch_note")
+
+    def test_collect_filters_active_ids_before_fetching_details(self):
+        with TemporaryDirectory() as tmp:
+            client = DetailFilteringClient()
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(False, (), 3),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+
+            notes, errors = source.collect(active_note_ids={"published-1"})
+
+        self.assertEqual(errors, [])
+        self.assertEqual([note.note_id for note in notes], ["new-1"])
+        self.assertEqual(client.calls, [("search", "a b c", 5, 1, 2, 2, False)])
+        self.assertEqual(
+            client.detail_urls,
+            ["https://www.xiaohongshu.com/explore/new-1?xsec_token=new-token&xsec_source=pc_search"],
+        )
 
     def test_source_failure_does_not_abort_other_sources(self):
         with TemporaryDirectory() as tmp:
@@ -157,7 +200,7 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].source_type, "keyword")
         self.assertEqual(errors[0].source_key, "generated")
-        self.assertEqual([call[0] for call in client.calls], ["homefeed"])
+        self.assertEqual([call[0] for call in client.calls], ["homefeed", "fetch_note"])
         self.assertEqual([note.source.source_type for note in notes], ["homefeed"])
 
     def test_weighted_rules_select_b_and_search_once(self):
@@ -175,8 +218,8 @@ class XhsSourceTest(unittest.TestCase):
             notes, errors = source.collect()
 
         self.assertEqual(errors, [])
-        self.assertEqual([call[0] for call in client.calls], ["search"])
-        self.assertEqual(client.calls[0], ("search", "b1 b2 b3", 5, 1, 2, 3, True))
+        self.assertEqual([call[0] for call in client.calls], ["search", "fetch_note"])
+        self.assertEqual(client.calls[0], ("search", "b1 b2 b3", 5, 1, 2, 3, False))
         self.assertEqual(source.last_keyword_rule_name, "B")
         self.assertEqual(source.last_keyword_query.query, "b1 b2 b3")
         self.assertEqual([note.source.source_type for note in notes], ["keyword"])

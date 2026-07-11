@@ -45,11 +45,11 @@ class PublishJobRunner:
         retry_after_start = getattr(self.publisher, "telegram_retry_after_count", 0)
         logger.info("run_once started")
         self.store.cleanup_expired()
-        notes, errors = self.source.collect()
         active_ids = self.store.active_note_ids()
+        notes, errors = self.source.collect(active_note_ids=set(active_ids))
         published = 0
         published_media = 0
-        skipped = 0
+        skipped = getattr(self.source, "last_pre_detail_dedup_skipped", 0)
         failed = 0
         failed_media = 0
         pending_retry_after_seconds: float | None = None

@@ -10,7 +10,7 @@ from rednote2tg.scheduler import PublishJobRunner
 
 
 class DrySource:
-    def collect(self):
+    def collect(self, active_note_ids=None):
         return [Note("n1", "https://xhs/n1", "Title", source=SourceRef("keyword", "榴莲"))], []
 
 

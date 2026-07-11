@@ -35,8 +35,10 @@ class FakeSource:
         self.last_keyword_query = keyword_query
         self.last_keyword_rule_name = keyword_rule_name
         self.fetched_urls = []
+        self.active_note_ids = None
 
-    def collect(self):
+    def collect(self, active_note_ids=None):
+        self.active_note_ids = active_note_ids
         return list(self.notes), []
 
     def fetch_note_url(self, url):
@@ -178,6 +180,19 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second_result["published_media"], 0)
             self.assertTrue(store.is_active("n1"))
             self.assertTrue(store.is_active("n2"))
+            store.close()
+
+    async def test_runner_passes_active_ids_to_source_before_collecting(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            store.record_publish(note("existing"), PublishResult(PublishStatus.SENT), ttl_days=7)
+            source = FakeSource([note("new")])
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+
+            await runner.run_once()
+
+            self.assertEqual(source.active_note_ids, {"existing"})
             store.close()
 
     async def test_runner_reports_published_and_failed_media_counts(self):
