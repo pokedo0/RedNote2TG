@@ -36,9 +36,11 @@ class FakeSource:
         self.last_keyword_rule_name = keyword_rule_name
         self.fetched_urls = []
         self.active_note_ids = None
+        self.detail_limit = None
 
-    def collect(self, active_note_ids=None):
+    def collect(self, active_note_ids=None, detail_limit=None):
         self.active_note_ids = active_note_ids
+        self.detail_limit = detail_limit
         return list(self.notes), []
 
     def fetch_note_url(self, url):
@@ -193,6 +195,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await runner.run_once()
 
             self.assertEqual(source.active_note_ids, {"existing"})
+            self.assertEqual(source.detail_limit, config.publishing.notes_per_run + 1)
             store.close()
 
     async def test_runner_reports_published_and_failed_media_counts(self):

@@ -61,6 +61,36 @@ class DetailFilteringClient(FakeXhsClient):
         }
 
 
+class DetailLimitClient(FakeXhsClient):
+    def __init__(self):
+        super().__init__()
+        self.detail_urls = []
+
+    def search_notes(self, query, limit=20, sort_type_choice=0, note_type=0, note_time=0, with_detail=False):
+        self.calls.append(("search", query, limit, sort_type_choice, note_type, note_time, with_detail))
+        return [
+            {"note_id": "published-1"},
+            {"note_id": "keyword-1"},
+            {"note_id": "keyword-2"},
+        ]
+
+    def homefeed_notes(self, category, limit=20, with_detail=False):
+        self.calls.append(("homefeed", category, limit, with_detail))
+        return [
+            {"note_id": "home-1"},
+            {"note_id": "home-2"},
+        ]
+
+    def fetch_note(self, note_url):
+        self.detail_urls.append(note_url)
+        note_id = note_url.split("/explore/", 1)[1].split("?", 1)[0]
+        return {
+            "note_id": note_id,
+            "note_url": note_url,
+            "title": note_id,
+        }
+
+
 class DeterministicRandom:
     def __init__(self, values):
         self.values = iter(values)
@@ -152,8 +182,8 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([note.source.source_type for note in notes], ["keyword", "homefeed"])
         self.assertEqual(client.calls[0], ("search", "a b c", 5, 1, 2, 2, False))
-        self.assertEqual(client.calls[1][0], "fetch_note")
-        self.assertEqual(client.calls[2], ("homefeed", "home", 3, False))
+        self.assertEqual(client.calls[1], ("homefeed", "home", 3, False))
+        self.assertEqual(client.calls[2][0], "fetch_note")
         self.assertEqual(client.calls[3][0], "fetch_note")
 
     def test_collect_filters_active_ids_before_fetching_details(self):
@@ -173,6 +203,37 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(
             client.detail_urls,
             ["https://www.xiaohongshu.com/explore/new-1?xsec_token=new-token&xsec_source=pc_search"],
+        )
+
+    def test_collect_limits_global_detail_fetches_after_active_dedup(self):
+        with TemporaryDirectory() as tmp:
+            client = DetailLimitClient()
+            source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)), client=client)
+
+            with self.assertLogs("rednote2tg.xhs_source", level="INFO") as logs:
+                notes, errors = source.collect(active_note_ids={"published-1"}, detail_limit=3)
+
+        self.assertEqual(errors, [])
+        self.assertEqual([note.note_id for note in notes], ["keyword-1", "keyword-2", "home-1"])
+        self.assertEqual(
+            client.detail_urls,
+            [
+                "https://www.xiaohongshu.com/explore/keyword-1?xsec_source=pc_search",
+                "https://www.xiaohongshu.com/explore/keyword-2?xsec_source=pc_search",
+                "https://www.xiaohongshu.com/explore/home-1?xsec_source=pc_feed",
+            ],
+        )
+        self.assertTrue(
+            any(
+                "note detail fetch limit: limit=3 eligible_candidates=4 selected_candidates=3" in output
+                for output in logs.output
+            )
+        )
+        self.assertTrue(
+            any(
+                "note detail fetch limit reached: limit=3 skipped_candidates=1" in output
+                for output in logs.output
+            )
         )
 
     def test_source_failure_does_not_abort_other_sources(self):

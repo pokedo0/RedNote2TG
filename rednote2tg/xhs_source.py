@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
@@ -10,6 +11,14 @@ from rednote2tg.keyword_rules import KeywordRuleError, generate_keyword_query, l
 from rednote2tg.models import MediaItem, MediaType, Note, SourceError, SourceRef
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _DetailCandidate:
+    note_id: str
+    item: dict[str, Any]
+    source: SourceRef
+    default_xsec_source: str
 
 
 class XhsClientProtocol(Protocol):
@@ -55,9 +64,17 @@ class XhsSource:
 
         return XhsPcClient(xhs_config.cookies, proxies=xhs_config.proxies)
 
-    def collect(self, active_note_ids: set[str] | None = None) -> tuple[list[Note], list[SourceError]]:
+    def collect(
+        self,
+        active_note_ids: set[str] | None = None,
+        detail_limit: int | None = None,
+    ) -> tuple[list[Note], list[SourceError]]:
+        if detail_limit is not None and detail_limit < 0:
+            raise ValueError("detail_limit must be non-negative")
+
         notes: list[Note] = []
         errors: list[SourceError] = []
+        candidate_batches: list[tuple[list[dict[str, Any]], SourceRef, str]] = []
         active_note_ids = active_note_ids or set()
         self.last_keyword_query = None
         self.last_keyword_rule_name = ""
@@ -86,12 +103,11 @@ class XhsSource:
                         note_time=keyword_query.note_time,
                         with_detail=False,
                     )
-                    notes.extend(
-                        self._fetch_details_after_dedup(
+                    candidate_batches.append(
+                        (
                             items,
                             SourceRef("keyword", keyword_query.query),
-                            active_note_ids,
-                            default_xsec_source="pc_search",
+                            "pc_search",
                         )
                     )
                 except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
@@ -106,17 +122,60 @@ class XhsSource:
                         limit=self.sources_config.homefeed.limit_per_category,
                         with_detail=False,
                     )
-                    notes.extend(
-                        self._fetch_details_after_dedup(
+                    candidate_batches.append(
+                        (
                             items,
                             SourceRef("homefeed", category),
-                            active_note_ids,
-                            default_xsec_source="pc_feed",
+                            "pc_feed",
                         )
                     )
                 except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
                     logger.exception("homefeed source failed: %s", category)
                     errors.append(SourceError("homefeed", category, str(exc)))
+
+        candidates: list[_DetailCandidate] = []
+        for items, source, default_xsec_source in candidate_batches:
+            candidates.extend(
+                self._filter_detail_candidates(
+                    items,
+                    source,
+                    active_note_ids,
+                    default_xsec_source,
+                )
+            )
+
+        selected_candidates = candidates if detail_limit is None else candidates[:detail_limit]
+        if detail_limit is not None:
+            logger.info(
+                "note detail fetch limit: limit=%d eligible_candidates=%d selected_candidates=%d",
+                detail_limit,
+                len(candidates),
+                len(selected_candidates),
+            )
+            skipped_candidates = len(candidates) - len(selected_candidates)
+            if skipped_candidates:
+                logger.info(
+                    "note detail fetch limit reached: limit=%d skipped_candidates=%d",
+                    detail_limit,
+                    skipped_candidates,
+                )
+
+        for candidate in selected_candidates:
+            note_url = _note_url_from_list_item(
+                candidate.item,
+                candidate.note_id,
+                candidate.default_xsec_source,
+            )
+            logger.info(
+                "note detail fetch started: note_id=%s source=%s",
+                candidate.note_id,
+                candidate.source.source_type,
+            )
+            note = normalize_note(self.client.fetch_note(note_url), candidate.source)
+            if note is not None:
+                notes.append(note)
+            else:
+                logger.warning("note skipped after detail: note_id=%s reason=missing_note_id", candidate.note_id)
 
         return notes, errors
 
@@ -140,14 +199,14 @@ class XhsSource:
                 normalized.append(note)
         return normalized
 
-    def _fetch_details_after_dedup(
+    def _filter_detail_candidates(
         self,
         items: list[dict[str, Any]],
         source: SourceRef,
         active_note_ids: set[str],
         default_xsec_source: str,
-    ) -> list[Note]:
-        normalized = []
+    ) -> list[_DetailCandidate]:
+        candidates = []
         for item in items or []:
             if not isinstance(item, dict):
                 logger.warning(
@@ -169,15 +228,8 @@ class XhsSource:
                 self.last_pre_detail_dedup_skipped += 1
                 logger.info("note skipped before detail: note_id=%s reason=active_dedup", note_id)
                 continue
-
-            note_url = _note_url_from_list_item(item, note_id, default_xsec_source)
-            logger.info("note detail fetch started: note_id=%s source=%s", note_id, source.source_type)
-            note = normalize_note(self.client.fetch_note(note_url), source)
-            if note is not None:
-                normalized.append(note)
-            else:
-                logger.warning("note skipped after detail: note_id=%s reason=missing_note_id", note_id)
-        return normalized
+            candidates.append(_DetailCandidate(note_id, item, source, default_xsec_source))
+        return candidates
 
     def fetch_note_url(self, note_url: str) -> Note | None:
         raw = self.client.fetch_note(note_url)

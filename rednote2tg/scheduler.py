@@ -46,7 +46,11 @@ class PublishJobRunner:
         logger.info("run_once started")
         self.store.cleanup_expired()
         active_ids = self.store.active_note_ids()
-        notes, errors = self.source.collect(active_note_ids=set(active_ids))
+        detail_limit = self.config.publishing.notes_per_run + 1
+        notes, errors = self.source.collect(
+            active_note_ids=set(active_ids),
+            detail_limit=detail_limit,
+        )
         published = 0
         published_media = 0
         skipped = getattr(self.source, "last_pre_detail_dedup_skipped", 0)
