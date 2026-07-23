@@ -239,9 +239,16 @@ class ConfigModelsTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config(data)
 
+    def test_parse_config_accepts_custom_ttl_days(self):
+        data = base_config()
+        data["dedup"]["ttl_days"] = 30
+
+        config = parse_config(data)
+        self.assertEqual(config.dedup.ttl_days, 30)
+
     def test_rejects_bad_ttl(self):
         data = base_config()
-        data["dedup"]["ttl_days"] = 6
+        data["dedup"]["ttl_days"] = 0
 
         with self.assertRaises(ConfigError):
             parse_config(data)

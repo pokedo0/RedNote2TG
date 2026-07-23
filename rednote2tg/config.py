@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,8 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
@@ -270,8 +273,7 @@ def _parse_publishing(data: dict) -> PublishingConfig:
 
 def _parse_dedup(data: dict) -> DedupConfig:
     ttl_days = _positive_int(data.get("ttl_days", 14), "dedup.ttl_days")
-    if not 7 <= ttl_days <= 14:
-        raise ConfigError("dedup.ttl_days must be between 7 and 14")
+    logger.debug("Parsed dedup ttl_days: %d", ttl_days)
     return DedupConfig(ttl_days=ttl_days)
 
 

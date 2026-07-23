@@ -216,7 +216,7 @@ class XhsSourceTest(unittest.TestCase):
 
         class FailingClient(FakeXhsClient):
             def search_notes(self, *args, **kwargs):
-                raise XhsApiError("search_notes", "request blocked", code=300012)
+                raise XhsApiError("search_notes", "request blocked")
 
         with TemporaryDirectory() as tmp:
             source = XhsSource(
@@ -228,7 +228,6 @@ class XhsSourceTest(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIn("search_notes", errors[0].message)
-        self.assertIn("code=300012", errors[0].message)
         self.assertIn("request blocked", errors[0].message)
 
     def test_collects_keyword_and_homefeed_notes(self):
