@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 from datetime import UTC, datetime
@@ -501,6 +501,7 @@ async def handle_update_cookie(
     runner: PublishJobRunner,
     admin_user_ids: tuple[int, ...],
     config_path: str,
+    state: RuntimeState | None = None,
 ) -> None:
     user_id = getattr(getattr(message, "from_user", None), "id", None)
     if not is_authorized(user_id, admin_user_ids):
@@ -518,7 +519,16 @@ async def handle_update_cookie(
 
     new_cookie = parts[1].strip()
 
-    # Update config file — preserve comments and formatting
+    # Build first so a constructor failure cannot invalidate the active client.
+    try:
+        new_xhs_config = XhsConfig(cookies=new_cookie, proxies=runner.config.xhs.proxies)
+        new_client = XhsSource._create_client(new_xhs_config)
+    except Exception as exc:
+        logger.exception("failed to build replacement XHS client")
+        await message.answer(f"❌ 客户端重建失败，当前 Cookie 仍在使用：{exc}")
+        return
+
+    # Persist second while preserving comments and formatting.
     try:
         config_file = Path(config_path)
         content = config_file.read_text(encoding="utf-8")
@@ -536,19 +546,17 @@ async def handle_update_cookie(
             )
         config_file.write_text(new_content, encoding="utf-8")
     except Exception as exc:
+        XhsSource._close_client(new_client)
         logger.exception("failed to update config file with new cookie")
-        await message.answer(f"❌ 配置文件更新失败：{exc}")
+        await message.answer(f"❌ 配置文件更新失败，当前 Cookie 仍在使用：{exc}")
         return
 
-    # Rebuild XHS client with new cookie
-    try:
-        new_xhs_config = XhsConfig(cookies=new_cookie, proxies=runner.config.xhs.proxies)
-        runner.source.client = XhsSource._create_client(new_xhs_config)
-    except Exception as exc:
-        logger.exception("failed to rebuild XHS client with new cookie")
-        await message.answer(f"⚠️ Cookie 已写入配置文件，但客户端重建失败：{exc}")
-        return
-
+    # Swap last; replace_client closes the previous application-owned client.
+    runner.source.replace_client(new_client, owned=True)
+    updated_config = replace(runner.config, xhs=new_xhs_config)
+    runner.config = updated_config
+    if state is not None:
+        state.config = updated_config
     logger.info("cookie updated successfully via bot command")
     await message.answer("✅ Cookie 已更新并生效")
 
@@ -634,17 +642,22 @@ def _apply_reload_config(state: RuntimeState, new_config: AppConfig) -> None:
     if old_config.xhs != new_config.xhs:
         new_client = XhsSource._create_client(new_config.xhs)
 
-    if old_config.schedule != new_config.schedule and state.scheduler is not None:
-        _replace_publish_schedules(state.scheduler, new_config, state)
+    try:
+        if old_config.schedule != new_config.schedule and state.scheduler is not None:
+            _replace_publish_schedules(state.scheduler, new_config, state)
 
-    state.config = new_config
-    state.runner.config = new_config
-    state.runner.source.sources_config = new_config.sources
-    if new_client is not None:
-        state.runner.source.client = new_client
-    state.runner.publisher.retry_after_padding_seconds = (
-        new_config.publishing.telegram_retry_after_padding_seconds
-    )
+        state.config = new_config
+        state.runner.config = new_config
+        state.runner.source.sources_config = new_config.sources
+        if new_client is not None:
+            state.runner.source.replace_client(new_client, owned=True)
+        state.runner.publisher.retry_after_padding_seconds = (
+            new_config.publishing.telegram_retry_after_padding_seconds
+        )
+    except Exception:
+        if new_client is not None and state.runner.source.client is not new_client:
+            XhsSource._close_client(new_client)
+        raise
 
 
 def _replace_publish_schedules(scheduler, config: AppConfig, runner) -> None:
@@ -719,7 +732,14 @@ def register_handlers(dispatcher, state: RuntimeState) -> None:
 
     @dispatcher.message(Command("update_cookie"))
     async def _update_cookie(message):
-        await handle_update_cookie(message, state.runner, state.config.telegram.admin_user_ids, state.config_path)
+        async with state.lock:
+            await handle_update_cookie(
+                message,
+                state.runner,
+                state.config.telegram.admin_user_ids,
+                state.config_path,
+                state,
+            )
 
     @dispatcher.message(Command("reload"))
     async def _reload(message):

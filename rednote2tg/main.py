@@ -11,6 +11,12 @@ from rednote2tg.telegram_publisher import TelegramPublisher
 from rednote2tg.xhs_source import XhsSource
 
 
+def _shutdown_runtime(scheduler, source: XhsSource, store: NoteStore) -> None:
+    scheduler.shutdown(wait=False)
+    source.close()
+    store.close()
+
+
 async def async_main(config_path: str = "config/config.yaml") -> None:
     config = load_config(config_path)
     configure_logging(config.logging)
@@ -49,8 +55,7 @@ async def async_main(config_path: str = "config/config.yaml") -> None:
     try:
         await dispatcher.start_polling(bot)
     finally:
-        scheduler.shutdown(wait=False)
-        store.close()
+        _shutdown_runtime(scheduler, source, store)
 
 
 def run() -> None:

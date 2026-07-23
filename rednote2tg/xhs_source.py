@@ -42,6 +42,9 @@ class XhsClientProtocol(Protocol):
     def unread_message(self):
         ...
 
+    def close(self) -> None:
+        ...
+
 
 class XhsSource:
     def __init__(
@@ -52,7 +55,8 @@ class XhsSource:
         rng: random.Random | None = None,
     ):
         self.sources_config = sources_config
-        self.client = client or self._create_client(xhs_config)
+        self._owns_client = client is None
+        self.client = client if client is not None else self._create_client(xhs_config)
         self.rng = rng or random.Random()
         self.last_keyword_query = None
         self.last_keyword_rule_name = ""
@@ -63,6 +67,42 @@ class XhsSource:
         from spider_xhs import XhsPcClient
 
         return XhsPcClient(xhs_config.cookies, proxies=xhs_config.proxies)
+
+    @staticmethod
+    def _close_client(client: XhsClientProtocol) -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            logger.exception("failed to close owned XHS client")
+
+    def replace_client(self, client: XhsClientProtocol, *, owned: bool = True) -> None:
+        old_client = self.client
+        old_owned = self._owns_client
+        if client is old_client:
+            self._owns_client = owned
+            return
+
+        self.client = client
+        self._owns_client = owned
+        logger.info("XHS client replaced: old_owned=%s new_owned=%s", old_owned, owned)
+        if old_owned:
+            self._close_client(old_client)
+
+    def close(self) -> None:
+        if not self._owns_client:
+            return
+        self._owns_client = False
+        logger.info("closing application-owned XHS client")
+        self._close_client(self.client)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     def collect(
         self,

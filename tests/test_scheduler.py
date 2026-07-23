@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
@@ -24,9 +24,11 @@ from rednote2tg.scheduler import (
     handle_run_once,
     handle_runtime_run_once,
     handle_status,
+    handle_update_cookie,
     is_authorized,
     register_schedules,
 )
+from rednote2tg.xhs_source import XhsSource
 
 
 class FakeSource:
@@ -48,6 +50,9 @@ class FakeSource:
         if self.notes:
             return self.notes[0]
         return None
+
+    def replace_client(self, client, *, owned=True):
+        self.client = client
 
 
 class FakeDownloader:
@@ -138,6 +143,82 @@ def note(note_id, media_count=0):
 
 
 class SchedulerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_update_cookie_swaps_client_after_persistence_and_closes_old(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            old_client = SimpleNamespace(close=Mock())
+            new_client = SimpleNamespace(close=Mock())
+            with patch.object(XhsSource, "_create_client", return_value=old_client):
+                source = XhsSource(config.xhs, config.sources)
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(1, "/update_cookie fresh-cookie")
+
+            with patch.object(XhsSource, "_create_client", return_value=new_client):
+                await handle_update_cookie(message, runner, (1,), str(config_path))
+
+            self.assertEqual(message.answers, ["✅ Cookie 已更新并生效"])
+            self.assertIn("fresh-cookie", config_path.read_text(encoding="utf-8"))
+            self.assertIs(source.client, new_client)
+            self.assertEqual(runner.config.xhs.cookies, "fresh-cookie")
+            old_client.close.assert_called_once_with()
+            new_client.close.assert_not_called()
+            source.close()
+            new_client.close.assert_called_once_with()
+            store.close()
+
+    async def test_update_cookie_write_failure_keeps_old_client_and_closes_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            original = config_path.read_text(encoding="utf-8")
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            old_client = SimpleNamespace(close=Mock())
+            new_client = SimpleNamespace(close=Mock())
+            with patch.object(XhsSource, "_create_client", return_value=old_client):
+                source = XhsSource(config.xhs, config.sources)
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(1, "/update_cookie fresh-cookie")
+
+            with (
+                patch.object(XhsSource, "_create_client", return_value=new_client),
+                patch.object(Path, "write_text", side_effect=PermissionError("read only")),
+            ):
+                await handle_update_cookie(message, runner, (1,), str(config_path))
+
+            self.assertIn("当前 Cookie 仍在使用", message.answers[0])
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            self.assertIs(source.client, old_client)
+            self.assertEqual(runner.config.xhs.cookies, config.xhs.cookies)
+            old_client.close.assert_not_called()
+            new_client.close.assert_called_once_with()
+            source.close()
+            store.close()
+
+    async def test_update_cookie_constructor_failure_keeps_config_and_client(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            original = config_path.read_text(encoding="utf-8")
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            old_client = SimpleNamespace(close=Mock())
+            with patch.object(XhsSource, "_create_client", return_value=old_client):
+                source = XhsSource(config.xhs, config.sources)
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(1, "/update_cookie fresh-cookie")
+
+            with patch.object(XhsSource, "_create_client", side_effect=RuntimeError("bad client")):
+                await handle_update_cookie(message, runner, (1,), str(config_path))
+
+            self.assertIn("当前 Cookie 仍在使用", message.answers[0])
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            self.assertIs(source.client, old_client)
+            self.assertEqual(runner.config.xhs.cookies, config.xhs.cookies)
+            old_client.close.assert_not_called()
+            source.close()
+            store.close()
+
     def write_runtime_files(self, tmp, data=None, rules=None):
         root = Path(tmp)
         config_path = root / "config.yaml"

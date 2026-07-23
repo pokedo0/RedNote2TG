@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from rednote2tg.config import HomefeedSourceConfig, KeywordRuleSourceConfig, KeywordSourceConfig, SourcesConfig, XhsConfig
 from rednote2tg.xhs_source import XhsSource
@@ -10,6 +11,7 @@ class FakeXhsClient:
     def __init__(self):
         self.calls = []
         self.fail_query = None
+        self.close_calls = 0
 
     def search_notes(self, query, limit=20, sort_type_choice=0, note_type=0, note_time=0, with_detail=False):
         self.calls.append(("search", query, limit, sort_type_choice, note_type, note_time, with_detail))
@@ -37,6 +39,9 @@ class FakeXhsClient:
             "desc": "Text",
             "nickname": "Author",
         }
+
+    def close(self):
+        self.close_calls += 1
 
 
 class DetailFilteringClient(FakeXhsClient):
@@ -172,6 +177,60 @@ def weighted_source_config(rules_a_path: str, rules_b_path: str):
 
 
 class XhsSourceTest(unittest.TestCase):
+    def test_owned_client_is_closed_once(self):
+        with TemporaryDirectory() as tmp:
+            client = FakeXhsClient()
+            with patch.object(XhsSource, "_create_client", return_value=client):
+                source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)))
+
+            source.close()
+            source.close()
+
+        self.assertEqual(client.close_calls, 1)
+
+    def test_injected_client_is_not_closed(self):
+        with TemporaryDirectory() as tmp:
+            client = FakeXhsClient()
+            source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)), client=client)
+
+            source.close()
+
+        self.assertEqual(client.close_calls, 0)
+
+    def test_replace_client_closes_previous_owned_client(self):
+        with TemporaryDirectory() as tmp:
+            old_client = FakeXhsClient()
+            new_client = FakeXhsClient()
+            with patch.object(XhsSource, "_create_client", return_value=old_client):
+                source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)))
+
+            source.replace_client(new_client, owned=True)
+            source.close()
+
+        self.assertIs(source.client, new_client)
+        self.assertEqual(old_client.close_calls, 1)
+        self.assertEqual(new_client.close_calls, 1)
+
+    def test_structured_upstream_error_text_is_preserved(self):
+        from spider_xhs import XhsApiError
+
+        class FailingClient(FakeXhsClient):
+            def search_notes(self, *args, **kwargs):
+                raise XhsApiError("search_notes", "request blocked", code=300012)
+
+        with TemporaryDirectory() as tmp:
+            source = XhsSource(
+                XhsConfig("cookie"),
+                source_config(write_rules(tmp)),
+                client=FailingClient(),
+            )
+            _, errors = source.collect()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("search_notes", errors[0].message)
+        self.assertIn("code=300012", errors[0].message)
+        self.assertIn("request blocked", errors[0].message)
+
     def test_collects_keyword_and_homefeed_notes(self):
         with TemporaryDirectory() as tmp:
             client = FakeXhsClient()
