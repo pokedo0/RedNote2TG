@@ -64,9 +64,15 @@ class XhsSource:
 
     @staticmethod
     def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol:
-        from spider_xhs import XhsPcClient
+        from spider_xhs import XhsPcAuthClient
+        from xhs_utils.xhs_pc import XHSPcAuth
 
-        return XhsPcClient(xhs_config.cookies, proxies=xhs_config.proxies)
+        logger.info("creating XHS auth client from configured cookie")
+        auth = XHSPcAuth.from_cookie(
+            xhs_config.cookies,
+            proxies=xhs_config.proxies,
+        )
+        return XhsPcAuthClient(auth)
 
     @staticmethod
     def _close_client(client: XhsClientProtocol) -> None:

@@ -4,7 +4,7 @@ telegram:
   admin_user_ids: []
 
 xhs:
-  cookies: "a1=replace-me; webId=replace-me"
+  cookies: "a1=replace-me; web_session=replace-me"
   proxies: null
 
 sources:

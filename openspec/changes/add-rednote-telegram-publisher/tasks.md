@@ -23,7 +23,7 @@
 
 ## 4. Xiaohongshu Source Adapter
 
-- [x] 4.1 Implement `XhsPcClient` initialization from configured cookies and optional proxies.
+- [x] 4.1 Implement `XHSPcAuth.from_cookie` and `XhsPcAuthClient` initialization from configured cookies and optional proxies.
 - [x] 4.2 Implement keyword search source using `search_notes(..., with_detail=True)`.
 - [x] 4.3 Implement homefeed source using `homefeed_notes(..., with_detail=True)`.
 - [x] 4.4 Normalize Spider_XHS note dictionaries into internal note models.

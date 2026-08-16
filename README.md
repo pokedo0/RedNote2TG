@@ -29,7 +29,7 @@ Edit `config/config.yaml`:
 - `sources.homefeed`: homefeed recommendation configuration.
 - `publishing.notes_per_run`: total notes to publish per scheduled run.
 - `logging`: console and persistent file logging. By default logs are written to `logs/rednote2tg.log`, rotated at 5 MB, compressed after rotation, and cleaned after 14 days or 20 rotated files.
-- `dedup.ttl_days`: short-term dedup window, 7 to 14 days.
+- `dedup.ttl_days`: short-term dedup window in days.
 - `schedule.interval_minutes`: publish interval in `schedule.timezone`.
 
 `config/config.yaml` and `config/keyword_rules.yaml` are ignored by git because they contain local runtime data.
@@ -54,6 +54,6 @@ Useful bot commands:
 
 - Keyword search and homefeed sources can be enabled independently.
 - Each run removes expired dedup records, collects candidates, skips active note IDs, and publishes up to `notes_per_run` notes.
-- Deduplication only covers the configured 7-14 day window. After expiry, the same note may be sent again.
+- Deduplication only covers the configured `ttl_days` window. After expiry, the same note may be sent again.
 - All note media is attempted. Media groups are split into chunks of 10, and only the first group has the full caption.
 - Media download or upload failures are retried. If media still fails, the note is marked `failed`; no text-only fallback is sent for media failures.

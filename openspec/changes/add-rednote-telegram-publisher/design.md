@@ -2,10 +2,14 @@
 
 RedNote2TG is starting from an almost empty project shell and needs its first application design. The project will be a Python service that imports the local Spider_XHS package from `D:\Program\java_project\Spider_XHS` and forwards Xiaohongshu notes into a Telegram channel.
 
-Spider_XHS already exposes a public facade:
+Spider_XHS exposes an auth-backed public facade:
 
 ```python
-from spider_xhs import XhsPcClient
+from spider_xhs import XhsPcAuthClient
+from xhs_utils.xhs_pc import XHSPcAuth
+
+auth = XHSPcAuth.from_cookie(cookies, proxies=proxies)
+client = XhsPcAuthClient(auth)
 ```
 
 The facade supports keyword search, homefeed recommendations, note detail fetching, and no-watermark media helpers. The Telegram side will use a bot that has administrator rights in the target channel.
@@ -50,7 +54,7 @@ This is simpler than a queue or split worker design and is enough for a low-volu
 
 ### Wrap Spider_XHS behind an internal source adapter
 
-Application code will not pass Spider_XHS raw dictionaries throughout the system. A source adapter will call `XhsPcClient.search_notes(..., with_detail=True)` and `XhsPcClient.homefeed_notes(..., with_detail=True)`, then normalize results into internal `Note` and `MediaItem` models.
+Application code will not pass Spider_XHS raw dictionaries throughout the system. A source adapter will call `XhsPcAuthClient.search_notes(..., with_detail=True)` and `XhsPcAuthClient.homefeed_notes(..., with_detail=True)`, then normalize results into internal `Note` and `MediaItem` models.
 
 This keeps Telegram formatting, deduplication, and scheduling independent from Spider_XHS response shapes.
 

@@ -16,7 +16,7 @@ The system SHALL use the Spider_XHS public facade as the Xiaohongshu integration
 
 #### Scenario: Source adapter starts
 - **WHEN** the source adapter is initialized with configured Xiaohongshu cookies
-- **THEN** it creates an `XhsPcClient` instance from the `spider_xhs` package
+- **THEN** it creates an `XHSPcAuth` from the configured Cookie and wraps it in an `XhsPcAuthClient` from the `spider_xhs` package
 
 ### Requirement: Fetch detailed notes
 The system SHALL fetch detailed note data for candidates before publishing.

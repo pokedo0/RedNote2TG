@@ -211,6 +211,20 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(old_client.close_calls, 1)
         self.assertEqual(new_client.close_calls, 1)
 
+    def test_create_client_uses_auth_backed_facade(self):
+        auth = object()
+        client = object()
+        proxies = {"http": "http://proxy"}
+        config = XhsConfig("a1=browser; web_session=session", proxies)
+
+        with patch("xhs_utils.xhs_pc.XHSPcAuth.from_cookie", return_value=auth) as from_cookie:
+            with patch("spider_xhs.XhsPcAuthClient", return_value=client) as facade:
+                result = XhsSource._create_client(config)
+
+        self.assertIs(result, client)
+        from_cookie.assert_called_once_with(config.cookies, proxies=proxies)
+        facade.assert_called_once_with(auth)
+
     def test_structured_upstream_error_text_is_preserved(self):
         from spider_xhs import XhsApiError
 
