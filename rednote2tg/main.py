@@ -61,6 +61,16 @@ async def async_main(config_path: str = "config/config.yaml") -> None:
         register_handlers(dispatcher, state)
 
         scheduler.start()
+        if source.client is None:
+            scheduler.pause()
+            logger.warning("Starting in degraded mode: XHS cookie expired, scheduled tasks paused")
+            try:
+                await publisher.send_debug_message(
+                    "⚠️ 启动降级模式：小红书Cookie已过期，定时任务已暂停。\n"
+                    "请使用 /update_cookie 更新Cookie后使用 /start_tasks 恢复。"
+                )
+            except Exception:
+                logger.exception("failed to send degraded mode notification to channel")
         await bot.set_my_commands([
             BotCommand(command="run_once", description="立即运行一次采集和发布任务"),
             BotCommand(command="status", description="查看当前系统运行状态"),

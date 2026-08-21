@@ -523,6 +523,9 @@ async def handle_update_cookie(
     try:
         new_xhs_config = XhsConfig(cookies=new_cookie, proxies=runner.config.xhs.proxies)
         new_client = XhsSource._create_client(new_xhs_config)
+        if new_client is None:
+            await message.answer("❌ 新Cookie验证失败（登录已过期），请确认Cookie有效性")
+            return
     except Exception as exc:
         logger.exception("failed to build replacement XHS client")
         await message.answer(f"❌ 客户端重建失败，当前 Cookie 仍在使用：{exc}")
@@ -641,6 +644,8 @@ def _apply_reload_config(state: RuntimeState, new_config: AppConfig) -> None:
     new_client = None
     if old_config.xhs != new_config.xhs:
         new_client = XhsSource._create_client(new_config.xhs)
+        if new_client is None:
+            logger.warning("reload: new XHS client bootstrap failed, keeping current client")
 
     try:
         if old_config.schedule != new_config.schedule and state.scheduler is not None:

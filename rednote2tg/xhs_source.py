@@ -63,7 +63,7 @@ class XhsSource:
         self.last_pre_detail_dedup_skipped = 0
 
     @staticmethod
-    def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol:
+    def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol | None:
         from spider_xhs import XhsPcAuthClient
         from xhs_utils.xhs_pc import XHSPcAuth
 
@@ -72,7 +72,11 @@ class XhsSource:
             xhs_config.cookies,
             proxies=xhs_config.proxies,
         )
-        return XhsPcAuthClient(auth)
+        try:
+            return XhsPcAuthClient(auth)
+        except RuntimeError:
+            logger.exception("XHS client bootstrap failed (cookie may be expired)")
+            return None
 
     @staticmethod
     def _close_client(client: XhsClientProtocol) -> None:
@@ -115,6 +119,9 @@ class XhsSource:
         active_note_ids: set[str] | None = None,
         detail_limit: int | None = None,
     ) -> tuple[list[Note], list[SourceError]]:
+        if self.client is None:
+            logger.warning("XHS client not available, skipping collect")
+            return [], [SourceError("client", "unavailable", "XHS client not initialized (cookie expired?)")]
         if detail_limit is not None and detail_limit < 0:
             raise ValueError("detail_limit must be non-negative")
 
@@ -278,6 +285,9 @@ class XhsSource:
         return candidates
 
     def fetch_note_url(self, note_url: str) -> Note | None:
+        if self.client is None:
+            logger.warning("XHS client not available, cannot fetch note")
+            return None
         raw = self.client.fetch_note(note_url)
         return normalize_note(raw, SourceRef("manual", note_url))
 
