@@ -42,6 +42,9 @@ class XhsClientProtocol(Protocol):
     def unread_message(self):
         ...
 
+    def merged_cookie_header(self) -> str:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -80,11 +83,8 @@ class XhsSource:
 
     @staticmethod
     def _close_client(client: XhsClientProtocol) -> None:
-        close = getattr(client, "close", None)
-        if not callable(close):
-            return
         try:
-            close()
+            client.close()
         except Exception:
             logger.exception("failed to close owned XHS client")
 
@@ -113,6 +113,16 @@ class XhsSource:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+    def merged_cookie_header(self) -> str | None:
+        if self.client is None:
+            logger.debug("cannot export XHS cookies: client unavailable")
+            return None
+        try:
+            return str(self.client.merged_cookie_header() or "") or None
+        except Exception:
+            logger.exception("failed to export merged XHS cookies")
+            return None
 
     def collect(
         self,

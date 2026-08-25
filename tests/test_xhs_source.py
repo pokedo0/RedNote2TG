@@ -40,6 +40,9 @@ class FakeXhsClient:
             "nickname": "Author",
         }
 
+    def merged_cookie_header(self):
+        return "a1=test;web_session=fake"
+
     def close(self):
         self.close_calls += 1
 

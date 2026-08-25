@@ -20,6 +20,7 @@ from rednote2tg.scheduler import (
     extract_xhs_url,
     format_run_once_summary,
     handle_fetch_note,
+    handle_ping,
     handle_reload,
     handle_run_once,
     handle_runtime_run_once,
@@ -32,13 +33,14 @@ from rednote2tg.xhs_source import XhsSource
 
 
 class FakeSource:
-    def __init__(self, notes, keyword_query=None, keyword_rule_name=""):
+    def __init__(self, notes, keyword_query=None, keyword_rule_name="", merged_cookies=None):
         self.notes = notes
         self.last_keyword_query = keyword_query
         self.last_keyword_rule_name = keyword_rule_name
         self.fetched_urls = []
         self.active_note_ids = None
         self.detail_limit = None
+        self.merged_cookies = merged_cookies
 
     def collect(self, active_note_ids=None, detail_limit=None):
         self.active_note_ids = active_note_ids
@@ -50,6 +52,9 @@ class FakeSource:
         if self.notes:
             return self.notes[0]
         return None
+
+    def merged_cookie_header(self):
+        return self.merged_cookies
 
     def replace_client(self, client, *, owned=True):
         self.client = client
@@ -148,8 +153,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             config_path = self.write_runtime_files(tmp)
             config = load_config(config_path)
             store = NoteStore(Path(tmp) / "db.sqlite")
-            old_client = SimpleNamespace(close=Mock())
-            new_client = SimpleNamespace(close=Mock())
+            old_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "fresh-cookie")
+            new_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "fresh-cookie")
             with patch.object(XhsSource, "_create_client", return_value=old_client):
                 source = XhsSource(config.xhs, config.sources)
             runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
@@ -174,8 +179,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             original = config_path.read_text(encoding="utf-8")
             config = load_config(config_path)
             store = NoteStore(Path(tmp) / "db.sqlite")
-            old_client = SimpleNamespace(close=Mock())
-            new_client = SimpleNamespace(close=Mock())
+            old_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "fresh-cookie")
+            new_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "fresh-cookie")
             with patch.object(XhsSource, "_create_client", return_value=old_client):
                 source = XhsSource(config.xhs, config.sources)
             runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
@@ -202,7 +207,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             original = config_path.read_text(encoding="utf-8")
             config = load_config(config_path)
             store = NoteStore(Path(tmp) / "db.sqlite")
-            old_client = SimpleNamespace(close=Mock())
+            old_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "fresh-cookie")
             with patch.object(XhsSource, "_create_client", return_value=old_client):
                 source = XhsSource(config.xhs, config.sources)
             runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
@@ -217,6 +222,84 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runner.config.xhs.cookies, config.xhs.cookies)
             old_client.close.assert_not_called()
             source.close()
+            store.close()
+
+    async def test_update_cookie_preserves_comments_and_uses_merged_cookie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            data = base_config()
+            original = yaml.safe_dump(data, allow_unicode=True).replace(
+                "cookies: a1=test",
+                "# credentials\n  cookies: \"a1=test\"",
+            )
+            config_path.write_text(original, encoding="utf-8")
+            config = load_config(config_path)
+            store = NoteStore(root / "db.sqlite")
+            old_client = SimpleNamespace(close=Mock())
+            new_client = SimpleNamespace(close=Mock(), merged_cookie_header=lambda: "loadts=123;xsecappid=xhs-pc-web")
+            with patch.object(XhsSource, "_create_client", return_value=old_client):
+                source = XhsSource(config.xhs, config.sources)
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            message = FakeMessage(1, "/update_cookie fresh-cookie")
+
+            with patch.object(XhsSource, "_create_client", return_value=new_client):
+                await handle_update_cookie(message, runner, (1,), str(config_path), self.runtime_state(config, store))
+
+            self.assertEqual(message.answers, ["✅ Cookie 已更新并生效"])
+            self.assertIn("# credentials", config_path.read_text(encoding="utf-8"))
+            self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
+            self.assertEqual(runner.config.xhs.cookies, "loadts=123;xsecappid=xhs-pc-web")
+            source.close()
+            store.close()
+
+    async def test_runtime_run_once_persists_merged_cookies_after_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([note("n1")], merged_cookies="loadts=123;xsecappid=xhs-pc-web")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+
+            result = await state.run_once()
+
+            self.assertEqual(result["published"], 1)
+            self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
+            self.assertEqual(state.config.xhs.cookies, "loadts=123;xsecappid=xhs-pc-web")
+            store.close()
+
+    async def test_runtime_run_once_does_not_rewrite_unchanged_cookies(self):
+        data = base_config()
+        data["xhs"]["cookies"] = "b2=new;a1=test"
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([note("n1")], merged_cookies="a1=test;b2=new")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+            before = config_path.read_text(encoding="utf-8")
+
+            await state.run_once()
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), before)
+            store.close()
+
+    async def test_runtime_run_once_cookie_write_failure_does_not_mask_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = self.write_runtime_files(tmp)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([note("n1")], merged_cookies="loadts=123")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+
+            with patch("rednote2tg.scheduler._replace_config_cookie", side_effect=PermissionError("locked")):
+                result = await state.run_once()
+
+            self.assertEqual(result["published"], 1)
+            self.assertIn("a1=test", config_path.read_text(encoding="utf-8"))
             store.close()
 
     def write_runtime_files(self, tmp, data=None, rules=None):
@@ -796,6 +879,24 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(scheduler.paused)
             store.close()
 
+    async def test_reload_persists_merged_cookies_after_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = base_config()
+            config_path = self.write_runtime_files(tmp, data)
+            config = load_config(config_path)
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            state = self.runtime_state(config, store)
+            state.config_path = str(config_path)
+            state.runner.source.merged_cookies = "loadts=123;xsecappid=xhs-pc-web"
+
+            message = FakeMessage(1)
+            await handle_reload(message, state)
+
+            self.assertIn("配置已热加载", message.answers[0])
+            self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
+            self.assertEqual(state.config.xhs.cookies, "loadts=123;xsecappid=xhs-pc-web")
+            store.close()
+
     async def test_reload_rejects_invalid_keyword_rules_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = base_config()
@@ -927,6 +1028,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         source = FakeSource([fetched_note])
         with tempfile.TemporaryDirectory() as tmp:
             store = NoteStore(Path(tmp) / "db.sqlite")
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("xhs:\n  cookies: a1=test\n", encoding="utf-8")
             downloader = FakeDownloader()
             media_path = Path(tmp) / "downloaded.jpg"
             media_path.write_bytes(b"x")
@@ -934,19 +1037,22 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             downloader.downloads = [downloaded_media]
             publisher = FakePublisher()
             runner = PublishJobRunner(config, source, store, downloader, publisher)
+            source.merged_cookies = "loadts=123;xsecappid=xhs-pc-web"
             message = FakeMessage(
                 1,
                 "/note https://www.xiaohongshu.com/explore/n1?xsec_token=abc",
                 "private",
             )
 
-            await handle_fetch_note(message, runner, ())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+            await handle_fetch_note(message, state)
 
             self.assertEqual(source.fetched_urls, ["https://www.xiaohongshu.com/explore/n1?xsec_token=abc"])
             self.assertTrue(downloader.cleaned)
             self.assertEqual(downloader.upload_live_photo, config.publishing.upload_live_photo)
             self.assertEqual(publisher.published, [(fetched_note, [downloaded_media], 1)])
             self.assertEqual(message.answers, [])
+            self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
             store.close()
 
     async def test_note_command_requires_private_chat(self):
@@ -954,13 +1060,38 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         source = FakeSource([note("n1")])
         with tempfile.TemporaryDirectory() as tmp:
             store = NoteStore(Path(tmp) / "db.sqlite")
+            config_path = Path(tmp) / "config.yaml"
+            original = "xhs:\n  cookies: a1=test\n"
+            config_path.write_text(original, encoding="utf-8")
+            source.merged_cookies = "loadts=123"
             runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
             message = FakeMessage(1, "/note https://www.xiaohongshu.com/explore/n1", "group")
 
-            await handle_fetch_note(message, runner, ())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+            await handle_fetch_note(message, state)
 
             self.assertEqual(message.answers, ["请私聊发送 /note <小红书笔记链接>"])
             self.assertEqual(source.fetched_urls, [])
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            store.close()
+
+    async def test_ping_failure_still_persists_merged_cookies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("xhs:\n  cookies: a1=test\n", encoding="utf-8")
+            config = parse_config(base_config())
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([note("n1")])
+            source.client = SimpleNamespace(unread_message=Mock(side_effect=RuntimeError("expired")))
+            source.merged_cookies = "loadts=123;xsecappid=xhs-pc-web"
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None, config_path=str(config_path))
+            message = FakeMessage(1)
+
+            await handle_ping(message, state)
+
+            self.assertIn("❌ Cookie 已失效或请求异常", message.answers[0])
+            self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
             store.close()
 
 

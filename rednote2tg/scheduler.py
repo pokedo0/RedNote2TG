@@ -187,9 +187,38 @@ class RuntimeState:
     def publisher(self):
         return self.runner.publisher
 
+    def persist_merged_cookies(self) -> None:
+        """Persist cookies after a complete operation; never mask its result."""
+        try:
+            merged_cookie = self.runner.source.merged_cookie_header()
+            if not merged_cookie:
+                logger.debug("xhs cookie write-back skipped: no merged cookie available")
+                return
+
+            old_cookie = self.config.xhs.cookies
+            if _parse_cookie_header(old_cookie) == _parse_cookie_header(merged_cookie):
+                logger.debug("xhs cookie write-back skipped: changed=false")
+                return
+
+            _replace_config_cookie(self.config_path, merged_cookie)
+            updated_xhs = XhsConfig(cookies=merged_cookie, proxies=self.config.xhs.proxies)
+            updated_config = replace(self.config, xhs=updated_xhs)
+            self.runner.config = updated_config
+            self.config = updated_config
+            logger.info(
+                "xhs merged cookies written back: path=%s keys=%d changed=true",
+                self.config_path,
+                len(_parse_cookie_header(merged_cookie)),
+            )
+        except Exception:
+            logger.exception("failed to write merged XHS cookies back to config")
+
     async def run_once(self) -> dict[str, Any]:
         async with self.lock:
-            return await self.runner.run_once()
+            try:
+                return await self.runner.run_once()
+            finally:
+                self.persist_merged_cookies()
 
 
 def create_scheduler(config: AppConfig, runner):
@@ -425,9 +454,10 @@ async def handle_stop_tasks(message, scheduler, admin_user_ids: tuple[int, ...])
         await message.answer("未配置调度器")
 
 
-async def handle_fetch_note(message, runner: PublishJobRunner, admin_user_ids: tuple[int, ...]) -> None:
+async def handle_fetch_note(message, state: RuntimeState) -> None:
+    runner = state.runner
     user_id = getattr(getattr(message, "from_user", None), "id", None)
-    if not is_authorized(user_id, admin_user_ids):
+    if not is_authorized(user_id, state.config.telegram.admin_user_ids):
         await message.answer("unauthorized")
         return
     chat_type = getattr(getattr(message, "chat", None), "type", None)
@@ -440,33 +470,37 @@ async def handle_fetch_note(message, runner: PublishJobRunner, admin_user_ids: t
         await message.answer("用法：/note <小红书笔记链接>")
         return
 
-    try:
-        note = runner.source.fetch_note_url(url)
-    except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
-        logger.exception("manual note fetch failed: %s", url)
-        await message.answer(f"抓取失败：{exc}")
-        return
-    if note is None:
-        await message.answer("未解析到笔记内容")
-        return
+    async with state.lock:
+        try:
+            try:
+                note = runner.source.fetch_note_url(url)
+            except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
+                logger.exception("manual note fetch failed: %s", url)
+                await message.answer(f"抓取失败：{exc}")
+                return
+            if note is None:
+                await message.answer("未解析到笔记内容")
+                return
 
-    chat_id = getattr(getattr(message, "chat", None), "id", None) or user_id
-    try:
-        downloads = await runner.downloader.download_all(
-            note.note_id,
-            note.media,
-            upload_live_photo=runner.config.publishing.upload_live_photo,
-        )
-        result = await runner.publisher.publish_note(note, downloads, chat_id=chat_id)
-    except Exception as exc:
-        logger.exception("manual note publish failed: %s", url)
-        await message.answer(f"发送失败：{exc}")
-        return
-    finally:
-        runner.downloader.cleanup()
+            chat_id = getattr(getattr(message, "chat", None), "id", None) or user_id
+            try:
+                downloads = await runner.downloader.download_all(
+                    note.note_id,
+                    note.media,
+                    upload_live_photo=runner.config.publishing.upload_live_photo,
+                )
+                result = await runner.publisher.publish_note(note, downloads, chat_id=chat_id)
+            except Exception as exc:
+                logger.exception("manual note publish failed: %s", url)
+                await message.answer(f"发送失败：{exc}")
+                return
+            finally:
+                runner.downloader.cleanup()
 
-    if result.status is PublishStatus.FAILED:
-        await message.answer(f"发送失败：{result.error_message or 'unknown'}")
+            if result.status is PublishStatus.FAILED:
+                await message.answer(f"发送失败：{result.error_message or 'unknown'}")
+        finally:
+            state.persist_merged_cookies()
 
 
 def extract_xhs_url(text: str) -> str | None:
@@ -476,24 +510,29 @@ def extract_xhs_url(text: str) -> str | None:
     return match.group(0).rstrip(".,;，。；")
 
 
-async def handle_ping(message, runner: PublishJobRunner, admin_user_ids: tuple[int, ...]) -> None:
+async def handle_ping(message, state: RuntimeState) -> None:
+    runner = state.runner
     user_id = getattr(getattr(message, "from_user", None), "id", None)
-    if not is_authorized(user_id, admin_user_ids):
+    if not is_authorized(user_id, state.config.telegram.admin_user_ids):
         await message.answer("unauthorized")
         return
-    try:
-        data = runner.source.client.unread_message()
-        # data is the full JSON response dict from XHS API
-        unread_counts = []
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key not in ("success", "msg", "code") and isinstance(value, (int, float)):
-                    unread_counts.append(f"  {key}={value}")
-        counts_text = "\n".join(unread_counts) if unread_counts else "  (无未读)"
-        await message.answer(f"✅ Cookie 有效\n{counts_text}")
-    except Exception as exc:
-        logger.warning("ping cookie check failed: %s", exc)
-        await message.answer(f"❌ Cookie 已失效或请求异常\n{exc}")
+    async with state.lock:
+        try:
+            try:
+                data = runner.source.client.unread_message()
+                # data is the full JSON response dict from XHS API
+                unread_counts = []
+                if isinstance(data, dict):
+                    for key, value in data.items():
+                        if key not in ("success", "msg", "code") and isinstance(value, (int, float)):
+                            unread_counts.append(f"  {key}={value}")
+                counts_text = "\n".join(unread_counts) if unread_counts else "  (无未读)"
+                await message.answer(f"✅ Cookie 有效\n{counts_text}")
+            except Exception as exc:
+                logger.warning("ping cookie check failed: %s", exc)
+                await message.answer(f"❌ Cookie 已失效或请求异常\n{exc}")
+        finally:
+            state.persist_merged_cookies()
 
 
 async def handle_update_cookie(
@@ -531,23 +570,14 @@ async def handle_update_cookie(
         await message.answer(f"❌ 客户端重建失败，当前 Cookie 仍在使用：{exc}")
         return
 
+    try:
+        new_cookie = str(new_client.merged_cookie_header() or "") or new_cookie
+    except Exception:
+        logger.exception("failed to export replacement client cookies; persisting input cookie")
+
     # Persist second while preserving comments and formatting.
     try:
-        config_file = Path(config_path)
-        content = config_file.read_text(encoding="utf-8")
-        data = yaml.safe_load(content) or {}
-        old_cookie = (data.get("xhs") or {}).get("cookies", "")
-
-        if old_cookie and old_cookie in content:
-            new_content = content.replace(old_cookie, new_cookie, 1)
-        else:
-            new_content = re.sub(
-                r'(cookies:\s*)(".*?"|\S[^\n]*)',
-                lambda m: m.group(1) + '"' + new_cookie + '"',
-                content,
-                count=1,
-            )
-        config_file.write_text(new_content, encoding="utf-8")
+        _replace_config_cookie(config_path, new_cookie)
     except Exception as exc:
         XhsSource._close_client(new_client)
         logger.exception("failed to update config file with new cookie")
@@ -556,7 +586,8 @@ async def handle_update_cookie(
 
     # Swap last; replace_client closes the previous application-owned client.
     runner.source.replace_client(new_client, owned=True)
-    updated_config = replace(runner.config, xhs=new_xhs_config)
+    updated_xhs = XhsConfig(cookies=new_cookie, proxies=new_xhs_config.proxies)
+    updated_config = replace(runner.config, xhs=updated_xhs)
     runner.config = updated_config
     if state is not None:
         state.config = updated_config
@@ -593,6 +624,8 @@ async def handle_reload(message, state: RuntimeState) -> None:
             logger.exception("config reload apply failed")
             await message.answer(f"❌ 热加载失败：{exc}")
             return
+
+        state.persist_merged_cookies()
 
     await message.answer(
         "✅ 配置已热加载\n"
@@ -698,7 +731,50 @@ def _job_id(job) -> str | None:
     if isinstance(job, tuple) and len(job) >= 3 and isinstance(job[2], dict):
         value = job[2].get("id")
         return str(value) if value is not None else None
-    return None
+
+
+def _parse_cookie_header(value: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for item in str(value or "").split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        name, separator, cookie_value = item.partition("=")
+        if separator:
+            cookies[name.strip()] = cookie_value
+    return cookies
+
+
+def _yaml_double_quoted(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _replace_config_cookie(config_path: str, new_cookie: str) -> bool:
+    config_file = Path(config_path)
+    content = config_file.read_text(encoding="utf-8")
+    data = yaml.safe_load(content) or {}
+    old_cookie = str((data.get("xhs") or {}).get("cookies", "") or "")
+    if _parse_cookie_header(old_cookie) == _parse_cookie_header(new_cookie):
+        logger.debug("config cookie unchanged: path=%s", config_path)
+        return False
+
+    quoted_pattern = re.compile(r'(?m)^([ \t]*cookies:[ \t]*)(["\'])(.*?)\2[ \t]*$')
+    quoted_match = quoted_pattern.search(content)
+    if quoted_match:
+        new_content = content[:quoted_match.start(2)] + _yaml_double_quoted(new_cookie) + content[quoted_match.end(3):]
+    else:
+        unquoted_pattern = re.compile(r'(?m)^([ \t]*cookies:[ \t]*)([^\r\n]+)[ \t]*$')
+        unquoted_match = unquoted_pattern.search(content)
+        if unquoted_match is None:
+            raise ValueError("cookies field not found in config file")
+        new_content = (
+            content[:unquoted_match.start(2)]
+            + _yaml_double_quoted(new_cookie)
+            + content[unquoted_match.end(2):]
+        )
+
+    config_file.write_text(new_content, encoding="utf-8")
+    return True
 
 
 def _is_scheduler_paused(scheduler) -> bool:
@@ -729,11 +805,11 @@ def register_handlers(dispatcher, state: RuntimeState) -> None:
 
     @dispatcher.message(Command("note"))
     async def _note(message):
-        await handle_fetch_note(message, state.runner, state.config.telegram.admin_user_ids)
+        await handle_fetch_note(message, state)
 
     @dispatcher.message(Command("ping"))
     async def _ping(message):
-        await handle_ping(message, state.runner, state.config.telegram.admin_user_ids)
+        await handle_ping(message, state)
 
     @dispatcher.message(Command("update_cookie"))
     async def _update_cookie(message):
