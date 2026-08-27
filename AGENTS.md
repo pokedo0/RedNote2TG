@@ -37,7 +37,7 @@ Top-level config keys:
 - `xhs`: `cookies`, optional `proxies`.
 - `sources.keywords`: `enabled`, `rules_path`, `search_limit_per_query`, `sort_type`, `note_type`.
 - `sources.homefeed`: `enabled`, `categories`, `limit_per_category`.
-- `publishing`: `notes_per_run`, `media_strategy`, `caption_parse_mode`, `telegram_retry_after_padding_seconds`, `upload_live_photo`.
+- `publishing`: `notes_per_run`, `telegram_retry_after_padding_seconds`, `upload_live_photo`.
 - `debug`: `enabled`.
 - `logging`: `level`, `console_enabled`, `file_enabled`, `file_path`, `max_bytes`, `retention_days`, `max_files`, `compress_rotated`.
 - `dedup`: `ttl_days`.

@@ -46,7 +46,7 @@ async def run_live_once(args: argparse.Namespace) -> int:
             XhsSource(config.xhs, config.sources),
             store,
             MediaDownloader(config.storage.media_temp_dir),
-            TelegramPublisher(bot, config.telegram.channel_id, config.publishing.caption_parse_mode),
+            TelegramPublisher(bot, config.telegram.channel_id),
         )
         admin_id = args.user_id
         if admin_id is None and config.telegram.admin_user_ids:

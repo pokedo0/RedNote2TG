@@ -51,7 +51,6 @@ async def async_main(config_path: str = "config/config.yaml") -> None:
         publisher = TelegramPublisher(
             bot,
             config.telegram.channel_id,
-            config.publishing.caption_parse_mode,
             retry_after_padding_seconds=config.publishing.telegram_retry_after_padding_seconds,
         )
         runner = PublishJobRunner(config, source, store, downloader, publisher)

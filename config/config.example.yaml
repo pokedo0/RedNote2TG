@@ -27,11 +27,13 @@ sources:
     categories:
       - "homefeed_recommend"
     limit_per_category: 20
+  # 批量抓取笔记详情时，相邻两次请求的间隔 = fixed_delay_seconds + random_delay_seconds 内的均匀随机值
+  detail_fetch:
+    fixed_delay_seconds: 7
+    random_delay_seconds: 3
 
 publishing:
-  notes_per_run: 5
-  media_strategy: "all"
-  caption_parse_mode: "HTML"
+  notes_per_run: 10
   telegram_retry_after_padding_seconds: 2
   note_interval_seconds: 5
   upload_live_photo: true  # false = Live Photo 按普通图片上传
@@ -40,7 +42,7 @@ debug:
   enabled: false
 
 logging:
-  level: "INFO"
+  level: "DEBUG"
   console_enabled: true
   file_enabled: true
   file_path: "logs/rednote2tg.log"

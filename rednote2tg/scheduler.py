@@ -770,10 +770,6 @@ def _unsupported_reload_changes(old: AppConfig, new: AppConfig) -> list[str]:
         changes.append("debug")
     if old.logging != new.logging:
         changes.append("logging")
-    if old.publishing.media_strategy != new.publishing.media_strategy:
-        changes.append("publishing.media_strategy")
-    if old.publishing.caption_parse_mode != new.publishing.caption_parse_mode:
-        changes.append("publishing.caption_parse_mode")
     return changes
 
 

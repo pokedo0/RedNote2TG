@@ -69,8 +69,6 @@ class SourcesConfig:
 @dataclass(frozen=True)
 class PublishingConfig:
     notes_per_run: int = 3
-    media_strategy: str = "all"
-    caption_parse_mode: str = "HTML"
     telegram_retry_after_padding_seconds: float = 1.0
     note_interval_seconds: float = 0.0
     upload_live_photo: bool = True
@@ -275,8 +273,6 @@ def _parse_publishing(data: dict) -> PublishingConfig:
         raise ConfigError("publishing.notes_per_run must be between 1 and 10")
     return PublishingConfig(
         notes_per_run=notes_per_run,
-        media_strategy=str(data.get("media_strategy", "all")),
-        caption_parse_mode=str(data.get("caption_parse_mode", "HTML")),
         telegram_retry_after_padding_seconds=_nonnegative_float(
             data.get("telegram_retry_after_padding_seconds", 1.0),
             "publishing.telegram_retry_after_padding_seconds",
