@@ -17,7 +17,7 @@ from rednote2tg.models import DownloadedMedia, MediaType, Note, PublishResult, P
 logger = logging.getLogger(__name__)
 
 
-_DESCRIPTION_MAX_CHARS = 200
+_DESCRIPTION_MAX_CHARS = 130
 _DESCRIPTION_MAX_LINES = 6
 _TRUNCATION_MARKER = "...."
 _TOPIC_PATTERN = re.compile(r"#([^#\[\]\r\n]+?)\[话题\]#")

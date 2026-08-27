@@ -131,6 +131,27 @@ class LoggingTest(unittest.TestCase):
         self.assertFalse(older.exists())
         self.assertFalse(oldest.exists())
 
+    def test_configure_logging_captures_loguru_output(self):
+        try:
+            from loguru import logger as loguru_logger
+        except ImportError:
+            self.skipTest("loguru is not installed")
+
+        path = self.temp_path / "rednote2tg.log"
+        configure_logging(
+            LoggingConfig(
+                console_enabled=False,
+                file_path=str(path),
+            ),
+        )
+
+        loguru_logger.bind(name="apis.xhs_pc_apis").info("xhs pc response cookies changed: test_token")
+        for handler in self.root.handlers:
+            handler.flush()
+
+        log_content = path.read_text(encoding="utf-8")
+        self.assertIn("xhs pc response cookies changed: test_token", log_content)
+
 
 if __name__ == "__main__":
     unittest.main()

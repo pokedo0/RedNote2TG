@@ -37,6 +37,32 @@ def configure_logging(config: LoggingConfig | int | None = None) -> None:
     root.handlers = handlers
     root.setLevel(level)
     logging.getLogger("spider_xhs").setLevel(level)
+    _configure_loguru()
+
+
+def _forward_loguru_to_logging(message: object) -> None:
+    record = getattr(message, "record", None)
+    if not record:
+        return
+    name = record.get("name") or "loguru"
+    level_no = record.get("level").no if record.get("level") else logging.INFO
+    logger = logging.getLogger(name)
+    logger.log(
+        level_no,
+        record.get("message", ""),
+        exc_info=record.get("exception"),
+    )
+
+
+def _configure_loguru() -> None:
+    try:
+        from loguru import logger as loguru_logger
+    except ImportError:
+        return
+
+    loguru_logger.remove()
+    loguru_logger.add(_forward_loguru_to_logging, level=0)
+    logging.getLogger(__name__).debug("loguru output routed to standard logging")
 
 
 def cleanup_old_logs(config: LoggingConfig) -> None:
