@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from queue import Queue
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Event, Lock
 from time import perf_counter
 from datetime import UTC, datetime
 from typing import Any
@@ -18,7 +20,7 @@ from rednote2tg.keyword_rules import describe_note_time, load_keyword_rules
 from rednote2tg.media import MediaDownloader
 from rednote2tg.models import PublishResult, PublishStatus
 from rednote2tg.telegram_publisher import TelegramPublisher
-from rednote2tg.xhs_source import XhsSource
+from rednote2tg.xhs_source import CollectionBatch, XhsSource
 
 logger = logging.getLogger(__name__)
 XHS_URL_PATTERN = re.compile(r"https?://[^\s<>]*xiaohongshu\.com/[^\s<>]+")
@@ -46,98 +48,200 @@ class PublishJobRunner:
         logger.info("run_once started")
         self.store.cleanup_expired()
         active_ids = self.store.active_note_ids()
-        detail_limit = self.config.publishing.notes_per_run + 1
-        notes, errors = self.source.collect(
-            active_note_ids=set(active_ids),
-            detail_limit=detail_limit,
+        keywords = self.config.sources.keywords
+        homefeed = self.config.sources.homefeed
+        queue_capacity = max(
+            1,
+            keywords.search_limit_per_query
+            + homefeed.limit_per_category * len(homefeed.categories),
         )
+        note_events: Queue[tuple[str, Any]] = Queue(maxsize=queue_capacity)
+        stop_fetching = Event()
+        filtered_ids = set(active_ids)
+        filtered_ids_lock = Lock()
         published = 0
         published_media = 0
-        skipped = getattr(self.source, "last_pre_detail_dedup_skipped", 0)
+        skipped = 0
         failed = 0
         failed_media = 0
         pending_retry_after_seconds: float | None = None
         wait_before_next_note = False
 
-        for note in notes:
-            if published >= self.config.publishing.notes_per_run:
-                break
-            if note.note_id in active_ids:
-                skipped += 1
-                logger.info("note skipped: note_id=%s reason=active_dedup", note.note_id)
-                continue
+        collected_notes = 0
+        errors = []
+        pagination_exhausted_before_target = False
 
-            if wait_before_next_note:
-                note_interval_seconds = self.config.publishing.note_interval_seconds
-                if note_interval_seconds > 0:
-                    logger.info(
-                        "note interval before next upload: sleep_seconds=%s",
-                        note_interval_seconds,
-                    )
-                    await asyncio.sleep(note_interval_seconds)
-                wait_before_next_note = False
+        def enqueue_note(note) -> None:
+            with filtered_ids_lock:
+                filtered_ids.add(note.note_id)
+            logger.info("note detail ready: note_id=%s queue_size=%d", note.note_id, note_events.qsize())
+            note_events.put(("note", note))
 
-            if pending_retry_after_seconds is not None:
-                padding_seconds = getattr(self.publisher, "retry_after_padding_seconds", 0.0)
-                sleep_seconds = pending_retry_after_seconds + padding_seconds
-                logger.warning(
-                    "telegram retry-after cooldown before next note: retry_after=%s sleep_seconds=%s",
-                    pending_retry_after_seconds,
-                    sleep_seconds,
-                )
-                await asyncio.sleep(sleep_seconds)
-                pending_retry_after_seconds = None
-
+        async def produce_notes() -> None:
+            nonlocal collected_notes, skipped, errors, pagination_exhausted_before_target
             try:
-                logger.info(
-                    "note upload started: note_id=%s title=%s media=%d",
-                    note.note_id,
-                    note.display_title,
-                    len(note.media),
-                )
-                downloads = await self.downloader.download_all(
-                    note.note_id,
-                    note.media,
-                    upload_live_photo=self.config.publishing.upload_live_photo,
-                )
-                result = await self.publisher.publish_note(note, downloads)
-            except Exception as exc:
-                logger.exception("note publish failed: %s", note.note_id)
-                result = PublishResult(PublishStatus.FAILED, error_message=str(exc))
-            finally:
-                self.downloader.cleanup()
+                collection_factory = getattr(self.source, "start_collection", None)
+                collection = collection_factory(active_ids) if callable(collection_factory) else None
+                page_number = 1
+                while True:
+                    with filtered_ids_lock:
+                        batch_active_ids = set(filtered_ids)
+                    if collection is not None:
+                        batch = await asyncio.to_thread(
+                            collection.collect_next,
+                            active_note_ids=batch_active_ids,
+                            on_note=enqueue_note,
+                        )
+                    else:
+                        # Compatibility for simple sources that have not adopted page sessions.
+                        batch_notes, batch_errors = await asyncio.to_thread(
+                            self.source.collect,
+                            active_note_ids=batch_active_ids,
+                            on_note=enqueue_note,
+                        )
+                        batch = CollectionBatch(tuple(batch_notes), tuple(batch_errors), True)
+                    collected_notes += len(batch.notes)
+                    skipped += getattr(self.source, "last_pre_detail_dedup_skipped", 0)
+                    errors.extend(batch.errors)
+                    logger.info(
+                        "note detail page produced: page=%d notes=%d errors=%d filtered=%d exhausted=%s",
+                        page_number,
+                        len(batch.notes),
+                        len(batch.errors),
+                        len(filtered_ids),
+                        batch.exhausted,
+                    )
+                    await asyncio.to_thread(note_events.put, ("batch_done", batch))
+                    # The next search must wait until every note from this page was attempted.
+                    await asyncio.to_thread(note_events.join)
+                    if stop_fetching.is_set():
+                        logger.info(
+                            "note detail pagination stopped after page consumption: page=%d reason=publish_target_reached",
+                            page_number,
+                        )
+                        break
+                    if batch.exhausted:
+                        pagination_exhausted_before_target = True
+                        logger.warning(
+                            "note detail pagination exhausted before publish target: page=%d published=%d target=%d reason=no_more_pages",
+                            page_number,
+                            published,
+                            self.config.publishing.notes_per_run,
+                        )
+                        break
+                    page_number += 1
+                await asyncio.to_thread(note_events.put, ("done", None))
+                logger.info("note detail producer finished: collected=%d errors=%d", collected_notes, len(errors))
+            except BaseException as exc:
+                logger.exception("note detail producer failed")
+                await asyncio.to_thread(note_events.put, ("error", exc))
 
-            if result.status in {PublishStatus.SENT, PublishStatus.SENT_DEGRADED}:
-                self.store.record_publish(note, result, self.config.dedup.ttl_days)
-                active_ids.add(note.note_id)
-                published += 1
-                published_media += len(note.media)
-                if result.error_message:
-                    logger.info(
-                        "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s error_message=%s",
-                        note.note_id,
-                        result.status.value,
-                        result.telegram_message_ids,
-                        result.error_message,
-                    )
-                else:
-                    logger.info(
-                        "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s",
-                        note.note_id,
-                        result.status.value,
-                        result.telegram_message_ids,
-                    )
-            else:
-                failed += 1
-                failed_media += len(note.media)
-                pending_retry_after_seconds = result.retry_after_seconds
-                logger.warning(
-                    "note upload finished: note_id=%s status=%s success=false reason=%s",
-                    note.note_id,
-                    result.status.value,
-                    result.error_message or "unknown",
-                )
-            wait_before_next_note = True
+        producer_task = asyncio.create_task(produce_notes())
+        producer_error = None
+        try:
+            while True:
+                event_type, payload = await asyncio.to_thread(note_events.get)
+                try:
+                    if event_type == "done":
+                        break
+                    if event_type == "error":
+                        producer_error = payload
+                        break
+                    if event_type == "batch_done":
+                        continue
+
+                    note = payload
+                    if note.note_id in active_ids:
+                        skipped += 1
+                        logger.info("note skipped: note_id=%s reason=active_dedup", note.note_id)
+                        continue
+
+                    if wait_before_next_note:
+                        note_interval_seconds = self.config.publishing.note_interval_seconds
+                        if note_interval_seconds > 0:
+                            logger.info(
+                                "note interval before next upload: sleep_seconds=%s",
+                                note_interval_seconds,
+                            )
+                            await asyncio.sleep(note_interval_seconds)
+                        wait_before_next_note = False
+
+                    if pending_retry_after_seconds is not None:
+                        padding_seconds = getattr(self.publisher, "retry_after_padding_seconds", 0.0)
+                        sleep_seconds = pending_retry_after_seconds + padding_seconds
+                        logger.warning(
+                            "telegram retry-after cooldown before next note: retry_after=%s padding_seconds=%s sleep_seconds=%s",
+                            pending_retry_after_seconds,
+                            padding_seconds,
+                            sleep_seconds,
+                        )
+                        await asyncio.sleep(sleep_seconds)
+                        pending_retry_after_seconds = None
+
+                    try:
+                        logger.info(
+                            "note upload started: note_id=%s title=%s media=%d",
+                            note.note_id,
+                            note.display_title,
+                            len(note.media),
+                        )
+                        downloads = await self.downloader.download_all(
+                            note.note_id,
+                            note.media,
+                            upload_live_photo=self.config.publishing.upload_live_photo,
+                        )
+                        result = await self.publisher.publish_note(note, downloads)
+                    except Exception as exc:
+                        logger.exception("note publish failed: %s", note.note_id)
+                        result = PublishResult(PublishStatus.FAILED, error_message=str(exc))
+                    finally:
+                        self.downloader.cleanup()
+
+                    if result.status in {PublishStatus.SENT, PublishStatus.SENT_DEGRADED}:
+                        self.store.record_publish(note, result, self.config.dedup.ttl_days)
+                        active_ids.add(note.note_id)
+                        published += 1
+                        published_media += len(note.media)
+                        if result.error_message:
+                            logger.info(
+                                "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s error_message=%s",
+                                note.note_id,
+                                result.status.value,
+                                result.telegram_message_ids,
+                                result.error_message,
+                            )
+                        else:
+                            logger.info(
+                                "note upload finished: note_id=%s status=%s success=true telegram_message_ids=%s",
+                                note.note_id,
+                                result.status.value,
+                                result.telegram_message_ids,
+                            )
+                        if published >= self.config.publishing.notes_per_run:
+                            stop_fetching.set()
+                    else:
+                        self.store.record_publish(note, result, self.config.dedup.ttl_days)
+                        active_ids.add(note.note_id)
+                        failed += 1
+                        failed_media += len(note.media)
+                        pending_retry_after_seconds = result.retry_after_seconds
+                        with filtered_ids_lock:
+                            filtered_ids.add(note.note_id)
+                        logger.warning(
+                            "note upload finished: note_id=%s status=%s success=false filtered_for_run=true stored=true ttl_days=%d reason=%s",
+                            note.note_id,
+                            result.status.value,
+                            self.config.dedup.ttl_days,
+                            result.error_message or "unknown",
+                        )
+                    wait_before_next_note = True
+                finally:
+                    note_events.task_done()
+        finally:
+            await producer_task
+
+        if producer_error is not None:
+            raise producer_error
 
         if errors:
             logger.warning("source errors during run: %s", errors)
@@ -152,8 +256,9 @@ class PublishJobRunner:
             "failed": failed,
             "failed_media": failed_media,
             "source_errors": len(errors),
-            "source_collected_notes": len(notes),
+            "source_collected_notes": collected_notes,
             "source_collected_errors": len(errors),
+            "pagination_exhausted_before_target": pagination_exhausted_before_target,
             "elapsed_seconds": elapsed_seconds,
             "keyword_query": keyword_query.query if keyword_query is not None else "",
             "keyword_rule": keyword_rule,

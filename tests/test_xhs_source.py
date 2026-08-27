@@ -3,7 +3,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from rednote2tg.config import HomefeedSourceConfig, KeywordRuleSourceConfig, KeywordSourceConfig, SourcesConfig, XhsConfig
+from rednote2tg.config import (
+    DetailFetchConfig,
+    HomefeedSourceConfig,
+    KeywordRuleSourceConfig,
+    KeywordSourceConfig,
+    SourcesConfig,
+    XhsConfig,
+)
 from rednote2tg.xhs_source import XhsSource
 
 
@@ -99,6 +106,43 @@ class DetailLimitClient(FakeXhsClient):
         }
 
 
+class PagedClient(FakeXhsClient):
+    def __init__(self):
+        super().__init__()
+        self.search_page_calls = []
+
+    def search_notes(
+        self,
+        query,
+        limit=20,
+        sort_type_choice=0,
+        note_type=0,
+        note_time=0,
+        with_detail=False,
+        page=1,
+        search_id=None,
+        return_meta=False,
+    ):
+        self.search_page_calls.append((query, page, search_id, return_meta))
+        items = [{"note_id": f"page-{page}", "xsec_token": f"token-{page}"}]
+        if return_meta:
+            return {
+                "items": items,
+                "page": page,
+                "search_id": search_id or "search-1",
+                "has_more": page == 1,
+            }
+        return items
+
+    def fetch_note(self, note_url):
+        note_id = note_url.split("/explore/", 1)[1].split("?", 1)[0]
+        return {
+            "note_id": note_id,
+            "note_url": note_url,
+            "title": note_id,
+        }
+
+
 class DeterministicRandom:
     def __init__(self, values):
         self.values = iter(values)
@@ -108,6 +152,9 @@ class DeterministicRandom:
 
     def choice(self, values):
         return values[0]
+
+    def uniform(self, low: float, high: float) -> float:
+        return (low + high) / 2
 
 
 def write_rules(directory: str) -> str:
@@ -156,10 +203,11 @@ time_weights:
     return str(path)
 
 
-def source_config(rules_path: str):
+def source_config(rules_path: str, detail_fetch: DetailFetchConfig | None = None):
     return SourcesConfig(
         keywords=KeywordSourceConfig(True, rules_path, 5, 1, 2),
         homefeed=HomefeedSourceConfig(True, ("home",), 3),
+        detail_fetch=detail_fetch or DetailFetchConfig(),
     )
 
 
@@ -261,6 +309,29 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(client.calls[2][0], "fetch_note")
         self.assertEqual(client.calls[3][0], "fetch_note")
 
+    def test_collection_session_reuses_keyword_and_search_id_across_pages(self):
+        with TemporaryDirectory() as tmp:
+            client = PagedClient()
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(False, (), 3),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+            session = source.start_collection()
+
+            first = session.collect_next()
+            second = session.collect_next()
+
+        self.assertFalse(first.exhausted)
+        self.assertTrue(second.exhausted)
+        self.assertEqual([note.note_id for note in first.notes], ["page-1"])
+        self.assertEqual([note.note_id for note in second.notes], ["page-2"])
+        self.assertEqual(
+            client.search_page_calls,
+            [("a b c", 1, None, True), ("a b c", 2, "search-1", True)],
+        )
+        self.assertEqual(source.last_keyword_query.query, "a b c")
+
     def test_collect_filters_active_ids_before_fetching_details(self):
         with TemporaryDirectory() as tmp:
             client = DetailFilteringClient()
@@ -300,16 +371,67 @@ class XhsSourceTest(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "note detail fetch limit: limit=3 eligible_candidates=4 selected_candidates=3" in output
+                "note detail page finished: page=1 notes=3 errors=0 candidates=4 has_more=False" in output
                 for output in logs.output
             )
         )
         self.assertTrue(
             any(
-                "note detail fetch limit reached: limit=3 skipped_candidates=1" in output
+                "legacy detail fetch limit: limit=3 eligible_candidates=4 selected_candidates=3" in output
                 for output in logs.output
             )
         )
+
+    def test_collect_sleeps_only_between_detail_fetches(self):
+        with TemporaryDirectory() as tmp:
+            client = FakeXhsClient()
+            config = source_config(
+                write_rules(tmp),
+                DetailFetchConfig(fixed_delay_seconds=1.5, random_delay_seconds=0.8),
+            )
+            source = XhsSource(
+                XhsConfig("cookie"),
+                config,
+                client=client,
+                rng=DeterministicRandom([0.0] * 10),
+            )
+
+            with patch("rednote2tg.xhs_source.time.sleep") as sleep:
+                notes, errors = source.collect()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(notes), 2)
+        sleep.assert_called_once_with(1.9)
+        self.assertEqual(client.calls[2][0], "fetch_note")
+        self.assertEqual(client.calls[3][0], "fetch_note")
+
+    def test_collect_does_not_sleep_for_zero_or_single_fetch_delay(self):
+        with TemporaryDirectory() as tmp:
+            single_client = DetailFilteringClient()
+            single_config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(False, (), 3),
+                detail_fetch=DetailFetchConfig(fixed_delay_seconds=2),
+            )
+            single_source = XhsSource(
+                XhsConfig("cookie"),
+                single_config,
+                client=single_client,
+            )
+            with patch("rednote2tg.xhs_source.time.sleep") as single_sleep:
+                single_source.collect(active_note_ids={"published-1"})
+
+            zero_client = FakeXhsClient()
+            zero_source = XhsSource(
+                XhsConfig("cookie"),
+                source_config(write_rules(tmp), DetailFetchConfig()),
+                client=zero_client,
+            )
+            with patch("rednote2tg.xhs_source.time.sleep") as zero_sleep:
+                zero_source.collect()
+
+        single_sleep.assert_not_called()
+        zero_sleep.assert_not_called()
 
     def test_source_failure_does_not_abort_other_sources(self):
         with TemporaryDirectory() as tmp:

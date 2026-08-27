@@ -48,6 +48,8 @@ class ConfigModelsTest(unittest.TestCase):
         self.assertEqual(config.telegram.channel_id, "@channel")
         self.assertEqual(config.telegram.admin_user_ids, (1, 2))
         self.assertEqual(config.sources.keywords.rules_path, "keyword_rules.yaml")
+        self.assertEqual(config.sources.detail_fetch.fixed_delay_seconds, 0.0)
+        self.assertEqual(config.sources.detail_fetch.random_delay_seconds, 0.0)
         self.assertEqual(config.publishing.notes_per_run, 3)
         self.assertEqual(config.publishing.telegram_retry_after_padding_seconds, 1.0)
         self.assertEqual(config.publishing.note_interval_seconds, 0.0)
@@ -81,6 +83,18 @@ class ConfigModelsTest(unittest.TestCase):
         config = parse_config(data)
 
         self.assertEqual(config.publishing.note_interval_seconds, 12.5)
+
+    def test_parse_config_accepts_detail_fetch_delays(self):
+        data = base_config()
+        data["sources"]["detail_fetch"] = {
+            "fixed_delay_seconds": 1.5,
+            "random_delay_seconds": 2,
+        }
+
+        config = parse_config(data)
+
+        self.assertEqual(config.sources.detail_fetch.fixed_delay_seconds, 1.5)
+        self.assertEqual(config.sources.detail_fetch.random_delay_seconds, 2.0)
 
     def test_parse_config_accepts_upload_live_photo_false(self):
         data = base_config()
@@ -266,6 +280,15 @@ class ConfigModelsTest(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             parse_config(data)
+
+    def test_rejects_negative_detail_fetch_delays(self):
+        for field_name in ("fixed_delay_seconds", "random_delay_seconds"):
+            with self.subTest(field_name=field_name):
+                data = base_config()
+                data["sources"]["detail_fetch"] = {field_name: -0.1}
+
+                with self.assertRaises(ConfigError):
+                    parse_config(data)
 
     def test_rejects_non_boolean_upload_live_photo(self):
         data = base_config()

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -29,7 +30,7 @@ from rednote2tg.scheduler import (
     is_authorized,
     register_schedules,
 )
-from rednote2tg.xhs_source import XhsSource
+from rednote2tg.xhs_source import CollectionBatch, XhsSource
 
 
 class FakeSource:
@@ -40,12 +41,21 @@ class FakeSource:
         self.fetched_urls = []
         self.active_note_ids = None
         self.detail_limit = None
+        self.collect_calls = []
         self.merged_cookies = merged_cookies
 
-    def collect(self, active_note_ids=None, detail_limit=None):
+    def collect(self, active_note_ids=None, detail_limit=None, on_note=None):
         self.active_note_ids = active_note_ids
         self.detail_limit = detail_limit
-        return list(self.notes), []
+        active_note_ids = active_note_ids or set()
+        self.collect_calls.append((set(active_note_ids), detail_limit))
+        notes = [item for item in self.notes if item.note_id not in active_note_ids]
+        if detail_limit is not None:
+            notes = notes[:detail_limit]
+        if on_note is not None:
+            for item in notes:
+                on_note(item)
+        return notes, []
 
     def fetch_note_url(self, url):
         self.fetched_urls.append(url)
@@ -58,6 +68,65 @@ class FakeSource:
 
     def replace_client(self, client, *, owned=True):
         self.client = client
+
+
+class BlockingSource(FakeSource):
+    def __init__(self, notes):
+        super().__init__(notes)
+        self.first_detail_ready = Event()
+        self.second_detail_ready = Event()
+        self.release_second_detail = Event()
+
+    def collect(self, active_note_ids=None, detail_limit=None, on_note=None):
+        self.active_note_ids = active_note_ids
+        self.detail_limit = detail_limit
+        active_note_ids = active_note_ids or set()
+        notes = [item for item in self.notes if item.note_id not in active_note_ids]
+        notes = notes[:detail_limit] if detail_limit is not None else notes
+        if on_note is not None and notes:
+            on_note(notes[0])
+            self.first_detail_ready.set()
+            self.release_second_detail.wait(timeout=2)
+            for item in notes[1:]:
+                on_note(item)
+            self.second_detail_ready.set()
+        return notes, []
+
+
+class PagedCollection:
+    def __init__(self, source, active_note_ids):
+        self.source = source
+        self.active_note_ids = set(active_note_ids)
+        self.page = 0
+
+    def collect_next(self, active_note_ids=None, on_note=None):
+        if active_note_ids is not None:
+            self.active_note_ids = set(active_note_ids)
+        page_index = self.page
+        self.page += 1
+        self.source.page_calls.append((page_index + 1, set(self.active_note_ids)))
+        notes = [
+            item for item in self.source.pages[page_index]
+            if item.note_id not in self.active_note_ids
+        ]
+        if on_note is not None:
+            for item in notes:
+                on_note(item)
+        return CollectionBatch(
+            tuple(notes),
+            (),
+            page_index >= len(self.source.pages) - 1,
+        )
+
+
+class PagedSource(FakeSource):
+    def __init__(self, pages):
+        super().__init__([item for page in pages for item in page])
+        self.pages = pages
+        self.page_calls = []
+
+    def start_collection(self, active_note_ids=None):
+        return PagedCollection(self, active_note_ids or set())
 
 
 class FakeDownloader:
@@ -86,6 +155,32 @@ class FakePublisher:
 
     async def send_debug_message(self, text):
         self.debug_messages.append(text)
+
+
+class ObservingPublisher(FakePublisher):
+    def __init__(self):
+        super().__init__()
+        self.first_published = Event()
+
+    async def publish_note(self, note, media, chat_id=None):
+        result = await super().publish_note(note, media, chat_id)
+        if len(self.published) == 1:
+            self.first_published.set()
+        return result
+
+
+class BlockingPublisher(FakePublisher):
+    def __init__(self):
+        super().__init__()
+        self.first_publish_started = Event()
+        self.release_first_publish = Event()
+
+    async def publish_note(self, note, media, chat_id=None):
+        result = await super().publish_note(note, media, chat_id)
+        if len(self.published) == 1:
+            self.first_publish_started.set()
+            await asyncio.to_thread(self.release_first_publish.wait, 2)
+        return result
 
 
 class SequencePublisher:
@@ -334,7 +429,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run_once()
             second_result = await runner.run_once()
 
-            self.assertEqual(result["published"], 1)
+            self.assertEqual(result["published"], 2)
             self.assertEqual(result["published_media"], 0)
             self.assertIn("elapsed_seconds", result)
             self.assertEqual(result["source_collected_notes"], 2)
@@ -342,7 +437,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["keyword_query"], "")
             self.assertEqual(result["keyword_time_filter"], "-")
             self.assertEqual(result["telegram_retry_after_count"], 0)
-            self.assertEqual(second_result["published"], 1)
+            self.assertEqual(second_result["published"], 0)
             self.assertEqual(second_result["published_media"], 0)
             self.assertTrue(store.is_active("n1"))
             self.assertTrue(store.is_active("n2"))
@@ -358,8 +453,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
             await runner.run_once()
 
-            self.assertEqual(source.active_note_ids, {"existing"})
-            self.assertEqual(source.detail_limit, config.publishing.notes_per_run + 1)
+            self.assertEqual(source.collect_calls[0][0], {"existing"})
+            self.assertIsNone(source.detail_limit)
             store.close()
 
     async def test_runner_reports_published_and_failed_media_counts(self):
@@ -510,9 +605,9 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             first_result = await runner.run_once()
 
             self.assertEqual(first_result["failed"], 1)
-            self.assertFalse(store.is_active("n1"))
+            self.assertTrue(store.is_active("n1"))
             second_result = await runner.run_once()
-            self.assertEqual(second_result["published"], 1)
+            self.assertEqual(second_result["published"], 0)
             self.assertTrue(store.is_active("n1"))
             store.close()
 
@@ -541,6 +636,126 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             sleep.assert_awaited_once_with(45.0)
             self.assertEqual(result["failed"], 1)
             self.assertEqual(result["published"], 1)
+            store.close()
+
+    async def test_runner_adds_retry_after_wait_after_normal_note_interval(self):
+        data = base_config()
+        data["publishing"]["note_interval_seconds"] = 2.0
+        config = parse_config(data)
+        publisher = SequencePublisher(
+            [
+                PublishResult(PublishStatus.FAILED, error_message="flood", retry_after_seconds=4),
+                PublishResult(PublishStatus.SENT, (101,)),
+            ]
+        )
+        publisher.retry_after_padding_seconds = 1.0
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(
+                config,
+                FakeSource([note("n1"), note("n2")]),
+                store,
+                FakeDownloader(),
+                publisher,
+            )
+
+            with patch("rednote2tg.scheduler.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                result = await runner.run_once()
+
+            self.assertEqual([await_args.args[0] for await_args in sleep.await_args_list], [2.0, 5.0])
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["published"], 1)
+            store.close()
+
+    async def test_runner_fetches_next_batch_until_success_target_is_reached(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 2
+        config = parse_config(data)
+        publisher = SequencePublisher(
+            [
+                PublishResult(PublishStatus.FAILED, error_message="bad"),
+                PublishResult(PublishStatus.SENT, (101,)),
+                PublishResult(PublishStatus.SENT, (102,)),
+            ]
+        )
+        source = PagedSource([[note("n1"), note("n2")], [note("n3")]])
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+
+            result = await runner.run_once()
+
+            self.assertEqual(result["published"], 2)
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["source_collected_notes"], 3)
+            self.assertEqual([call[0] for call in source.page_calls], [1, 2])
+            self.assertEqual(source.page_calls[1][1], {"n1", "n2"})
+            self.assertTrue(store.is_active("n1"))
+            self.assertTrue(store.is_active("n2"))
+            self.assertTrue(store.is_active("n3"))
+            store.close()
+
+    async def test_runner_does_not_request_next_page_until_current_page_is_consumed(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 2
+        config = parse_config(data)
+        source = PagedSource([[note("n1"), note("n2")], [note("n3")]])
+        publisher = BlockingPublisher()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+            run_task = asyncio.create_task(runner.run_once())
+
+            try:
+                self.assertTrue(await asyncio.to_thread(publisher.first_publish_started.wait, 1))
+                self.assertEqual([call[0] for call in source.page_calls], [1])
+            finally:
+                publisher.release_first_publish.set()
+
+            result = await run_task
+
+            self.assertEqual(result["published"], 2)
+            self.assertEqual([call[0] for call in source.page_calls], [1])
+            store.close()
+
+    async def test_runner_attempts_all_notes_from_current_page_after_target(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 1
+        config = parse_config(data)
+        source = PagedSource([[note("n1"), note("n2"), note("n3")], [note("n4")]])
+        publisher = FakePublisher()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+
+            result = await runner.run_once()
+
+            self.assertEqual(result["published"], 3)
+            self.assertEqual([call[0] for call in source.page_calls], [1])
+            self.assertEqual([item[0].note_id for item in publisher.published], ["n1", "n2", "n3"])
+            store.close()
+
+    async def test_runner_uploads_first_ready_note_before_detail_batch_finishes(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 2
+        config = parse_config(data)
+        source = BlockingSource([note("n1"), note("n2")])
+        publisher = ObservingPublisher()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+            run_task = asyncio.create_task(runner.run_once())
+
+            try:
+                self.assertTrue(await asyncio.to_thread(source.first_detail_ready.wait, 1))
+                self.assertTrue(await asyncio.to_thread(publisher.first_published.wait, 1))
+                self.assertFalse(source.second_detail_ready.is_set())
+            finally:
+                source.release_second_detail.set()
+
+            result = await run_task
+
+            self.assertEqual(result["published"], 2)
             store.close()
 
     async def test_runner_passes_live_photo_upload_config_to_downloader(self):

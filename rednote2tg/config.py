@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,9 +54,16 @@ class HomefeedSourceConfig:
 
 
 @dataclass(frozen=True)
+class DetailFetchConfig:
+    fixed_delay_seconds: float = 0.0
+    random_delay_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class SourcesConfig:
     keywords: KeywordSourceConfig
     homefeed: HomefeedSourceConfig
+    detail_fetch: DetailFetchConfig = field(default_factory=DetailFetchConfig)
 
 
 @dataclass(frozen=True)
@@ -185,6 +192,7 @@ def _parse_xhs(data: dict) -> XhsConfig:
 def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesConfig:
     keywords_data = data.get("keywords") or {}
     homefeed_data = data.get("homefeed") or {}
+    detail_fetch_data = data.get("detail_fetch") or {}
     keywords_enabled = bool(keywords_data.get("enabled", True))
     rules_path = str(keywords_data.get("rules_path") or "").strip()
     rules = _parse_keyword_rule_sources(keywords_data.get("rules"), base_path)
@@ -206,7 +214,17 @@ def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesCo
         categories=tuple(str(c).strip() for c in homefeed_data.get("categories") or () if str(c).strip()),
         limit_per_category=_positive_int(homefeed_data.get("limit_per_category", 20), "sources.homefeed.limit_per_category"),
     )
-    return SourcesConfig(keywords=keywords, homefeed=homefeed)
+    detail_fetch = DetailFetchConfig(
+        fixed_delay_seconds=_nonnegative_float(
+            detail_fetch_data.get("fixed_delay_seconds", 0.0),
+            "sources.detail_fetch.fixed_delay_seconds",
+        ),
+        random_delay_seconds=_nonnegative_float(
+            detail_fetch_data.get("random_delay_seconds", 0.0),
+            "sources.detail_fetch.random_delay_seconds",
+        ),
+    )
+    return SourcesConfig(keywords=keywords, homefeed=homefeed, detail_fetch=detail_fetch)
 
 
 def _parse_keyword_rule_sources(value: object, base_path: str | Path | None) -> tuple[KeywordRuleSourceConfig, ...]:

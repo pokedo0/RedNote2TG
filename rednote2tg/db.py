@@ -10,6 +10,8 @@ from rednote2tg.models import Note, PublishResult, PublishStatus
 
 PUBLISHED_STATUSES = (PublishStatus.SENT.value, PublishStatus.SENT_DEGRADED.value)
 PUBLISHED_STATUS_SET = {PublishStatus.SENT, PublishStatus.SENT_DEGRADED}
+ACTIVE_STATUS_VALUES = (*PUBLISHED_STATUSES, PublishStatus.FAILED.value)
+RECORDABLE_STATUS_SET = {*PUBLISHED_STATUS_SET, PublishStatus.FAILED}
 
 
 def utc_now() -> datetime:
@@ -65,8 +67,8 @@ class NoteStore:
     def active_note_ids(self, now: datetime | None = None) -> set[str]:
         now = now or utc_now()
         rows = self.conn.execute(
-            "SELECT note_id FROM published_notes WHERE expire_at >= ? AND status IN (?, ?)",
-            (now.isoformat(), *PUBLISHED_STATUSES),
+            "SELECT note_id FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?)",
+            (now.isoformat(), *ACTIVE_STATUS_VALUES),
         ).fetchall()
         return {str(row["note_id"]) for row in rows}
 
@@ -80,12 +82,12 @@ class NoteStore:
         ttl_days: int,
         now: datetime | None = None,
     ) -> None:
-        if result.status not in PUBLISHED_STATUS_SET:
+        if result.status not in RECORDABLE_STATUS_SET:
             return
 
         now = now or utc_now()
         expire_at = now + timedelta(days=ttl_days)
-        sent_at = now.isoformat()
+        sent_at = now.isoformat() if result.status in PUBLISHED_STATUS_SET else None
         self.conn.execute(
             """
             INSERT INTO published_notes (
@@ -124,8 +126,8 @@ class NoteStore:
     def summary(self, now: datetime | None = None) -> StatusSummary:
         now = now or utc_now()
         active = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM published_notes WHERE expire_at >= ? AND status IN (?, ?)",
-            (now.isoformat(), *PUBLISHED_STATUSES),
+            "SELECT COUNT(*) AS c FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?)",
+                (now.isoformat(), *ACTIVE_STATUS_VALUES),
         ).fetchone()["c"]
         sent = self.conn.execute(
             "SELECT COUNT(*) AS c FROM published_notes WHERE status IN (?, ?)",

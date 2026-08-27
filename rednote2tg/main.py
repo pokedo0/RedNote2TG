@@ -91,3 +91,7 @@ async def async_main(config_path: str = "config/config.yaml") -> None:
 
 def run() -> None:
     asyncio.run(async_main())
+
+
+if __name__ == "__main__":
+    run()

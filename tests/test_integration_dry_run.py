@@ -13,9 +13,14 @@ class DrySource:
     def __init__(self):
         self.detail_limit = None
 
-    def collect(self, active_note_ids=None, detail_limit=None):
+    def collect(self, active_note_ids=None, detail_limit=None, on_note=None):
         self.detail_limit = detail_limit
-        return [Note("n1", "https://xhs/n1", "Title", source=SourceRef("keyword", "榴莲"))], []
+        note = Note("n1", "https://xhs/n1", "Title", source=SourceRef("keyword", "榴莲"))
+        if note.note_id in (active_note_ids or set()):
+            return [], []
+        if on_note is not None:
+            on_note(note)
+        return [note], []
 
 
 class DryDownloader:
@@ -42,7 +47,7 @@ class DryRunIntegrationTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run_once()
 
             self.assertEqual(result["published"], 1)
-            self.assertEqual(source.detail_limit, config.publishing.notes_per_run + 1)
+            self.assertIsNone(source.detail_limit)
             self.assertTrue(store.is_active("n1"))
             store.close()
 
