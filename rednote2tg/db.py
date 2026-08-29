@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from rednote2tg.models import Note, PublishResult, PublishStatus
+from rednote2tg.models import FilteredNote, Note, PublishResult, PublishStatus
 
 PUBLISHED_STATUSES = (PublishStatus.SENT.value, PublishStatus.SENT_DEGRADED.value)
 PUBLISHED_STATUS_SET = {PublishStatus.SENT, PublishStatus.SENT_DEGRADED}
-ACTIVE_STATUS_VALUES = (*PUBLISHED_STATUSES, PublishStatus.FAILED.value)
+ACTIVE_STATUS_VALUES = (*PUBLISHED_STATUSES, PublishStatus.FAILED.value, PublishStatus.FILTERED.value)
 RECORDABLE_STATUS_SET = {*PUBLISHED_STATUS_SET, PublishStatus.FAILED}
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -67,7 +70,7 @@ class NoteStore:
     def active_note_ids(self, now: datetime | None = None) -> set[str]:
         now = now or utc_now()
         rows = self.conn.execute(
-            "SELECT note_id FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?)",
+            "SELECT note_id FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?, ?)",
             (now.isoformat(), *ACTIVE_STATUS_VALUES),
         ).fetchall()
         return {str(row["note_id"]) for row in rows}
@@ -123,10 +126,60 @@ class NoteStore:
         )
         self.conn.commit()
 
+    def record_filtered(
+        self,
+        note: FilteredNote,
+        ttl_days: int,
+        now: datetime | None = None,
+    ) -> None:
+        now = now or utc_now()
+        expire_at = now + timedelta(days=ttl_days)
+        self.conn.execute(
+            """
+            INSERT INTO published_notes (
+                note_id, source_type, source_key, note_url, title,
+                first_seen_at, sent_at, expire_at, status,
+                telegram_message_ids, error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(note_id) DO UPDATE SET
+                source_type = excluded.source_type,
+                source_key = excluded.source_key,
+                note_url = excluded.note_url,
+                title = excluded.title,
+                sent_at = excluded.sent_at,
+                expire_at = excluded.expire_at,
+                status = excluded.status,
+                telegram_message_ids = excluded.telegram_message_ids,
+                error_message = excluded.error_message
+            """,
+            (
+                note.note_id,
+                note.source.source_type,
+                note.source.source_key,
+                note.url,
+                note.title,
+                now.isoformat(),
+                None,
+                expire_at.isoformat(),
+                PublishStatus.FILTERED.value,
+                "[]",
+                note.reason,
+            ),
+        )
+        self.conn.commit()
+        logger.info(
+            "note filter stored: note_id=%s status=%s reason=%s ttl_days=%d",
+            note.note_id,
+            PublishStatus.FILTERED.value,
+            note.reason,
+            ttl_days,
+        )
+
     def summary(self, now: datetime | None = None) -> StatusSummary:
         now = now or utc_now()
         active = self.conn.execute(
-            "SELECT COUNT(*) AS c FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?)",
+            "SELECT COUNT(*) AS c FROM published_notes WHERE expire_at >= ? AND status IN (?, ?, ?, ?)",
                 (now.isoformat(), *ACTIVE_STATUS_VALUES),
         ).fetchone()["c"]
         sent = self.conn.execute(

@@ -47,7 +47,7 @@ class DryRunIntegrationTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run_once()
 
             self.assertEqual(result["published"], 1)
-            self.assertIsNone(source.detail_limit)
+            self.assertEqual(source.detail_limit, config.publishing.notes_per_run)
             self.assertTrue(store.is_active("n1"))
             store.close()
 

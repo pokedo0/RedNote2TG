@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 from rednote2tg.config import KeywordRuleSourceConfig, SourcesConfig, XhsConfig
 from rednote2tg.keyword_rules import KeywordRuleError, generate_keyword_query, load_keyword_rules
-from rednote2tg.models import MediaItem, MediaType, Note, SourceError, SourceRef
+from rednote2tg.models import FilteredNote, MediaItem, MediaType, Note, SourceError, SourceRef
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ class CollectionBatch:
     notes: tuple[Note, ...]
     errors: tuple[SourceError, ...]
     exhausted: bool
+    filtered_notes: tuple[FilteredNote, ...] = ()
 
 
 class XhsClientProtocol(Protocol):
@@ -159,7 +160,7 @@ class XhsSource:
         if detail_limit is not None and detail_limit < 0:
             raise ValueError("detail_limit must be non-negative")
         session = self.start_collection(active_note_ids)
-        batch = session.collect_next(detail_limit=detail_limit, on_note=on_note)
+        batch = session.collect_next(batch_size=detail_limit, on_note=on_note)
         return list(batch.notes), list(batch.errors)
 
     def _sleep_between_detail_fetches(self) -> None:
@@ -247,12 +248,16 @@ class XhsCollectionSession:
         self.source = source
         self.active_note_ids = set(active_note_ids)
         self.page = 1
+        self.current_page = 0
         self.search_id: str | None = None
         self.exhausted = False
         self._keyword_initialized = False
         self._keyword_has_more = True
         self._homefeed_loaded = False
         self._seen_note_ids: set[str] = set()
+        self._candidate_buffer: Deque[_DetailCandidate] = deque()
+        self._current_page_has_more = False
+        self._pending_filtered_notes: list[FilteredNote] = []
         self.source.last_keyword_query = None
         self.source.last_keyword_rule_name = ""
         self.source.last_pre_detail_dedup_skipped = 0
@@ -260,13 +265,13 @@ class XhsCollectionSession:
     def collect_next(
         self,
         active_note_ids: set[str] | None = None,
-        detail_limit: int | None = None,
+        batch_size: int | None = None,
         on_note: Callable[[Note], None] | None = None,
     ) -> CollectionBatch:
-        if detail_limit is not None and detail_limit < 0:
-            raise ValueError("detail_limit must be non-negative")
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be positive")
         if self.exhausted:
-            return CollectionBatch((), (), True)
+            return self._make_batch((), (), True)
 
         self.source.last_pre_detail_dedup_skipped = 0
         if active_note_ids is not None:
@@ -280,53 +285,37 @@ class XhsCollectionSession:
                 True,
             )
 
-        candidates: Deque[_DetailCandidate] = deque()
         errors: list[SourceError] = []
-        page_has_more = False
-        keyword_items: list[dict[str, Any]] = []
+        while not self._candidate_buffer:
+            if not self._keyword_initialized:
+                page_errors = self._load_initial_page()
+                errors.extend(page_errors)
+            elif self._current_page_has_more:
+                page_errors = self._load_next_keyword_page()
+                errors.extend(page_errors)
+            else:
+                self.exhausted = True
+                return self._make_batch((), errors, True)
 
-        if self.source.sources_config.keywords.enabled:
-            keyword_page, keyword_errors = self._fetch_keyword_page()
-            keyword_items = list(keyword_page.items)
-            keyword_has_more = keyword_page.has_more
-            errors.extend(keyword_errors)
-            page_has_more = keyword_has_more
-            if self.source.last_keyword_query is not None:
-                candidates.extend(
-                    self._eligible_candidates(
-                        keyword_items,
-                        SourceRef("keyword", self.source.last_keyword_query.query),
-                        "pc_search",
-                    )
-                )
-        elif not self._keyword_initialized:
-            self._keyword_initialized = True
+            if self.exhausted:
+                return self._make_batch((), errors, True)
 
-        if not self._homefeed_loaded and self.source.sources_config.homefeed.enabled:
-            self._homefeed_loaded = True
-            for category in self.source.sources_config.homefeed.categories:
-                try:
-                    items = self.source.client.homefeed_notes(
-                        category,
-                        limit=self.source.sources_config.homefeed.limit_per_category,
-                        with_detail=False,
-                    )
-                    candidates.extend(
-                        self._eligible_candidates(items, SourceRef("homefeed", category), "pc_feed")
-                    )
-                except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
-                    logger.exception("homefeed source failed: %s", category)
-                    errors.append(SourceError("homefeed", category, str(exc)))
-
-        selected_candidates = list(candidates)
-        if detail_limit is not None:
-            selected_candidates = selected_candidates[:detail_limit]
-            logger.info(
-                "legacy detail fetch limit: limit=%d eligible_candidates=%d selected_candidates=%d",
-                detail_limit,
-                len(candidates),
-                len(selected_candidates),
-            )
+        if batch_size is None:
+            selected_candidates = list(self._candidate_buffer)
+            self._candidate_buffer.clear()
+        else:
+            selected_candidates = [
+                self._candidate_buffer.popleft()
+                for _ in range(min(batch_size, len(self._candidate_buffer)))
+            ]
+        logger.info(
+            "note detail batch selected: page=%d batch_size=%s selected=%d remaining_candidates=%d has_more=%s",
+            self.current_page,
+            batch_size if batch_size is not None else "all",
+            len(selected_candidates),
+            len(self._candidate_buffer),
+            self._current_page_has_more,
+        )
 
         notes: list[Note] = []
         for index, candidate in enumerate(selected_candidates):
@@ -342,7 +331,7 @@ class XhsCollectionSession:
                 "note detail fetch started: note_id=%s source=%s page=%d",
                 candidate.note_id,
                 candidate.source.source_type,
-                self.page,
+                self.current_page,
             )
             try:
                 note = normalize_note(self.source.client.fetch_note(note_url), candidate.source)
@@ -357,29 +346,85 @@ class XhsCollectionSession:
             if on_note is not None:
                 on_note(note)
 
-        if not self.source.sources_config.keywords.enabled:
-            page_has_more = False
-        if self.source.sources_config.keywords.enabled and not selected_candidates and not errors and not page_has_more:
-            logger.info("keyword search page yielded no eligible details: page=%d", self.page)
-        if page_has_more and not keyword_items:
-            logger.warning(
-                "keyword pagination stopped: page=%d reported has_more=true but returned no items",
-                self.page,
-            )
-            page_has_more = False
-
-        self.exhausted = not page_has_more
-        if not self.exhausted:
-            self.page += 1
+        self.exhausted = not self._candidate_buffer and not self._current_page_has_more
         logger.info(
-            "note detail page finished: page=%d notes=%d errors=%d candidates=%d has_more=%s",
-            self.page if self.exhausted else self.page - 1,
+            "note detail batch finished: page=%d notes=%d errors=%d remaining_candidates=%d has_more=%s exhausted=%s",
+            self.current_page,
             len(notes),
             len(errors),
-            len(candidates),
-            page_has_more,
+            len(self._candidate_buffer),
+            self._current_page_has_more,
+            self.exhausted,
         )
-        return CollectionBatch(tuple(notes), tuple(errors), self.exhausted)
+        return self._make_batch(notes, errors, self.exhausted)
+
+    def _make_batch(
+        self,
+        notes: list[Note] | tuple[Note, ...],
+        errors: list[SourceError] | tuple[SourceError, ...],
+        exhausted: bool,
+    ) -> CollectionBatch:
+        filtered_notes = tuple(self._pending_filtered_notes)
+        self._pending_filtered_notes.clear()
+        return CollectionBatch(tuple(notes), tuple(errors), exhausted, filtered_notes)
+
+    def _load_initial_page(self) -> list[SourceError]:
+        errors: list[SourceError] = []
+        if self.source.sources_config.keywords.enabled:
+            page, page_errors = self._fetch_keyword_page()
+            errors.extend(page_errors)
+            self._accept_keyword_page(page)
+        self._keyword_initialized = True
+
+        if not self._homefeed_loaded and self.source.sources_config.homefeed.enabled:
+            self._homefeed_loaded = True
+            for category in self.source.sources_config.homefeed.categories:
+                try:
+                    items = self.source.client.homefeed_notes(
+                        category,
+                        limit=self.source.sources_config.homefeed.limit_per_category,
+                        with_detail=False,
+                    )
+                    self._candidate_buffer.extend(
+                        self._eligible_candidates(items, SourceRef("homefeed", category), "pc_feed")
+                    )
+                except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
+                    logger.exception("homefeed source failed: %s", category)
+                    errors.append(SourceError("homefeed", category, str(exc)))
+        if not self.source.sources_config.keywords.enabled:
+            self._current_page_has_more = False
+        return errors
+
+    def _load_next_keyword_page(self) -> list[SourceError]:
+        page, errors = self._fetch_keyword_page()
+        self._accept_keyword_page(page)
+        return errors
+
+    def _accept_keyword_page(self, page: SearchPage) -> None:
+        self.current_page = page.page
+        self._current_page_has_more = page.has_more
+        if page.has_more and not page.items:
+            logger.warning(
+                "keyword pagination returned empty page with has_more=true: page=%d",
+                page.page,
+            )
+        if self.source.last_keyword_query is not None:
+            self._candidate_buffer.extend(
+                self._eligible_candidates(
+                    list(page.items),
+                    SourceRef("keyword", self.source.last_keyword_query.query),
+                    "pc_search",
+                )
+            )
+        self.page = page.page + 1
+        logger.info(
+            "keyword page accepted: page=%d candidates=%d remaining_candidates=%d has_more=%s next_page=%d",
+            page.page,
+            len(page.items),
+            len(self._candidate_buffer),
+            page.has_more,
+            self.page,
+        )
 
     def _fetch_keyword_page(
         self,
@@ -494,8 +539,83 @@ class XhsCollectionSession:
                 logger.info("note skipped before detail: note_id=%s reason=run_dedup", candidate.note_id)
                 continue
             self._seen_note_ids.add(candidate.note_id)
+            if candidate.source.source_type == "keyword":
+                filtered_note = self._low_interaction_filter(candidate)
+                if filtered_note is not None:
+                    self._pending_filtered_notes.append(filtered_note)
+                    logger.info(
+                        "note skipped before detail: note_id=%s reason=%s liked=%d collected=%d comment=%d shared=%d",
+                        candidate.note_id,
+                        filtered_note.reason,
+                        filtered_note.liked_count,
+                        filtered_note.collected_count,
+                        filtered_note.comment_count,
+                        filtered_note.share_count,
+                    )
+                    continue
             candidates.append(candidate)
         return candidates
+
+    def _low_interaction_filter(self, candidate: _DetailCandidate) -> FilteredNote | None:
+        item = candidate.item
+        note_card = item.get("note_card")
+        interact_info = note_card.get("interact_info") if isinstance(note_card, dict) else None
+        if not isinstance(interact_info, dict):
+            logger.info(
+                "interaction filter skipped: note_id=%s reason=incomplete_interact_info",
+                candidate.note_id,
+            )
+            return None
+
+        values: list[int] = []
+        for key in ("liked_count", "collected_count", "comment_count", "shared_count"):
+            value = interact_info.get(key)
+            if isinstance(value, bool):
+                value = None
+            elif isinstance(value, int):
+                value = value if value >= 0 else None
+            elif isinstance(value, str) and value.strip().isdigit():
+                value = int(value.strip())
+            else:
+                value = None
+            if value is None:
+                logger.info(
+                    "interaction filter skipped: note_id=%s reason=incomplete_interact_info field=%s",
+                    candidate.note_id,
+                    key,
+                )
+                return None
+            values.append(value)
+
+        liked_count, collected_count, comment_count, share_count = values
+        if not (liked_count == 0 or collected_count == 0):
+            return None
+        if sum(value == 0 for value in values) < 2:
+            return None
+
+        title = ""
+        if isinstance(note_card, dict):
+            title = str(note_card.get("display_title") or note_card.get("title") or "")
+        title = title or str(item.get("title") or item.get("display_title") or "")
+        url = _first(item, "note_url", "url") or _note_url_from_list_item(
+            item,
+            candidate.note_id,
+            candidate.default_xsec_source,
+        )
+        return FilteredNote(
+            note_id=candidate.note_id,
+            url=str(url),
+            title=title,
+            source=candidate.source,
+            liked_count=liked_count,
+            collected_count=collected_count,
+            comment_count=comment_count,
+            share_count=share_count,
+            reason=(
+                f"low_interaction: liked={liked_count}, collected={collected_count}, "
+                f"comment={comment_count}, shared={share_count}"
+            ),
+        )
 
 
 def normalize_note(raw: dict[str, Any], source: SourceRef) -> Note | None:

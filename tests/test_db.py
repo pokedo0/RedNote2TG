@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from rednote2tg.db import NoteStore
-from rednote2tg.models import Note, PublishResult, PublishStatus, SourceRef
+from rednote2tg.models import FilteredNote, Note, PublishResult, PublishStatus, SourceRef
 
 
 def note(note_id="n1"):
@@ -12,6 +12,33 @@ def note(note_id="n1"):
 
 
 class NoteStoreTest(unittest.TestCase):
+    def test_record_filtered_reuses_active_dedup_record(self):
+        filtered = FilteredNote(
+            note_id="filtered-1",
+            url="https://xhs/filtered-1",
+            title="Low interaction",
+            source=SourceRef("keyword", "query"),
+            liked_count=0,
+            collected_count=1,
+            comment_count=0,
+            share_count=2,
+            reason="low_interaction: liked=0, collected=1, comment=0, shared=2",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            store.record_filtered(filtered, ttl_days=7)
+
+            row = store.conn.execute(
+                "SELECT status, error_message, telegram_message_ids FROM published_notes WHERE note_id = ?",
+                ("filtered-1",),
+            ).fetchone()
+
+            self.assertTrue(store.is_active("filtered-1"))
+            self.assertEqual(row["status"], PublishStatus.FILTERED.value)
+            self.assertEqual(row["error_message"], filtered.reason)
+            self.assertEqual(row["telegram_message_ids"], "[]")
+            store.close()
+
     def test_record_publish_creates_active_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = NoteStore(Path(tmp) / "db.sqlite")

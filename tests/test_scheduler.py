@@ -13,7 +13,16 @@ from tests.test_config_models import base_config
 from tests.test_keyword_rules import base_rules
 from rednote2tg.config import load_config, parse_config
 from rednote2tg.db import NoteStore
-from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, PublishResult, PublishStatus, SourceRef
+from rednote2tg.models import (
+    DownloadedMedia,
+    FilteredNote,
+    MediaItem,
+    MediaType,
+    Note,
+    PublishResult,
+    PublishStatus,
+    SourceRef,
+)
 from rednote2tg.scheduler import (
     PublishJobRunner,
     RuntimeState,
@@ -98,24 +107,32 @@ class PagedCollection:
         self.source = source
         self.active_note_ids = set(active_note_ids)
         self.page = 0
+        self.remaining = []
 
-    def collect_next(self, active_note_ids=None, on_note=None):
+    def collect_next(self, active_note_ids=None, batch_size=None, on_note=None):
         if active_note_ids is not None:
             self.active_note_ids = set(active_note_ids)
-        page_index = self.page
-        self.page += 1
-        self.source.page_calls.append((page_index + 1, set(self.active_note_ids)))
-        notes = [
-            item for item in self.source.pages[page_index]
-            if item.note_id not in self.active_note_ids
-        ]
+        if not self.remaining:
+            page_index = self.page
+            self.page += 1
+            if page_index >= len(self.source.pages):
+                return CollectionBatch((), (), True)
+            self.source.page_calls.append((page_index + 1, set(self.active_note_ids)))
+            self.remaining = [
+                item for item in self.source.pages[page_index]
+                if item.note_id not in self.active_note_ids
+            ]
+        notes = self.remaining
+        if batch_size is not None:
+            notes = notes[:batch_size]
+        self.remaining = self.remaining[len(notes):]
         if on_note is not None:
             for item in notes:
                 on_note(item)
         return CollectionBatch(
             tuple(notes),
             (),
-            page_index >= len(self.source.pages) - 1,
+            not self.remaining and self.page >= len(self.source.pages),
         )
 
 
@@ -127,6 +144,49 @@ class PagedSource(FakeSource):
 
     def start_collection(self, active_note_ids=None):
         return PagedCollection(self, active_note_ids or set())
+
+
+class FilteredPagedCollection:
+    def __init__(self, source, active_note_ids):
+        self.source = source
+        self.active_note_ids = set(active_note_ids)
+        self.page = 0
+
+    def collect_next(self, active_note_ids=None, batch_size=None, on_note=None):
+        if active_note_ids is not None:
+            self.active_note_ids = set(active_note_ids)
+        self.source.page_calls.append((self.page + 1, set(self.active_note_ids)))
+        if self.page == 0:
+            self.page += 1
+            filtered = FilteredNote(
+                note_id="filtered-1",
+                url="https://xhs/filtered-1",
+                title="filtered-1",
+                source=SourceRef("keyword", "k"),
+                liked_count=0,
+                collected_count=0,
+                comment_count=0,
+                share_count=0,
+                reason="low_interaction: liked=0, collected=0, comment=0, shared=0",
+            )
+            notes = (note("page-1"),)
+            if on_note is not None:
+                on_note(notes[0])
+            return CollectionBatch(notes, (), False, (filtered,))
+        self.page += 1
+        notes = (note("page-2"),)
+        if on_note is not None:
+            on_note(notes[0])
+        return CollectionBatch(notes, (), True)
+
+
+class FilteredPagedSource(FakeSource):
+    def __init__(self):
+        super().__init__([])
+        self.page_calls = []
+
+    def start_collection(self, active_note_ids=None):
+        return FilteredPagedCollection(self, active_note_ids or set())
 
 
 class FakeDownloader:
@@ -243,6 +303,29 @@ def note(note_id, media_count=0):
 
 
 class SchedulerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_stores_prefiltered_notes_before_next_page(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 2
+        config = parse_config(data)
+        source = FilteredPagedSource()
+        publisher = FakePublisher()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+
+            result = await runner.run_once()
+
+            row = store.conn.execute(
+                "SELECT status, error_message FROM published_notes WHERE note_id = ?",
+                ("filtered-1",),
+            ).fetchone()
+            self.assertEqual(result["filtered"], 1)
+            self.assertEqual(row["status"], PublishStatus.FILTERED.value)
+            self.assertIn("liked=0", row["error_message"])
+            self.assertIn("filtered-1", source.page_calls[1][1])
+            self.assertEqual([item[0].note_id for item in publisher.published], ["page-1", "page-2"])
+            store.close()
+
     async def test_update_cookie_swaps_client_after_persistence_and_closes_old(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = self.write_runtime_files(tmp)
@@ -429,15 +512,15 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             result = await runner.run_once()
             second_result = await runner.run_once()
 
-            self.assertEqual(result["published"], 2)
+            self.assertEqual(result["published"], 1)
             self.assertEqual(result["published_media"], 0)
             self.assertIn("elapsed_seconds", result)
-            self.assertEqual(result["source_collected_notes"], 2)
+            self.assertEqual(result["source_collected_notes"], 1)
             self.assertEqual(result["source_collected_errors"], 0)
             self.assertEqual(result["keyword_query"], "")
             self.assertEqual(result["keyword_time_filter"], "-")
             self.assertEqual(result["telegram_retry_after_count"], 0)
-            self.assertEqual(second_result["published"], 0)
+            self.assertEqual(second_result["published"], 1)
             self.assertEqual(second_result["published_media"], 0)
             self.assertTrue(store.is_active("n1"))
             self.assertTrue(store.is_active("n2"))
@@ -454,7 +537,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             await runner.run_once()
 
             self.assertEqual(source.collect_calls[0][0], {"existing"})
-            self.assertIsNone(source.detail_limit)
+            self.assertEqual(source.detail_limit, config.publishing.notes_per_run)
             store.close()
 
     async def test_runner_reports_published_and_failed_media_counts(self):
@@ -718,6 +801,31 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([call[0] for call in source.page_calls], [1])
             store.close()
 
+    async def test_runner_consumes_current_page_in_multiple_batches_before_paging(self):
+        data = base_config()
+        data["publishing"]["notes_per_run"] = 2
+        config = parse_config(data)
+        source = PagedSource(
+            [[note("n1"), note("n2"), note("n3"), note("n4")], [note("n5")]]
+        )
+        publisher = SequencePublisher(
+            [
+                PublishResult(PublishStatus.FAILED, error_message="bad"),
+                PublishResult(PublishStatus.SENT, (101,)),
+                PublishResult(PublishStatus.SENT, (102,)),
+                PublishResult(PublishStatus.SENT, (103,)),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), publisher)
+
+            result = await runner.run_once()
+
+            self.assertEqual(result["published"], 3)
+            self.assertEqual([call[0] for call in source.page_calls], [1])
+            store.close()
+
     async def test_runner_attempts_all_notes_from_current_page_after_target(self):
         data = base_config()
         data["publishing"]["notes_per_run"] = 1
@@ -730,9 +838,9 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
             result = await runner.run_once()
 
-            self.assertEqual(result["published"], 3)
+            self.assertEqual(result["published"], 1)
             self.assertEqual([call[0] for call in source.page_calls], [1])
-            self.assertEqual([item[0].note_id for item in publisher.published], ["n1", "n2", "n3"])
+            self.assertEqual([item[0].note_id for item in publisher.published], ["n1"])
             store.close()
 
     async def test_runner_uploads_first_ready_note_before_detail_batch_finishes(self):

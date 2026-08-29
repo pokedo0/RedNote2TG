@@ -106,6 +106,74 @@ class DetailLimitClient(FakeXhsClient):
         }
 
 
+class InteractionFilteringClient(FakeXhsClient):
+    def __init__(self):
+        super().__init__()
+        self.detail_urls = []
+
+    def search_notes(self, query, limit=20, sort_type_choice=0, note_type=0, note_time=0, with_detail=False):
+        return [
+            self._card("filtered-all-zero", "0", "0", "0", "0"),
+            self._card("filtered-two-zero", "0", "1", "0", "2"),
+            self._card("kept-one-zero", "0", "1", "2", "3"),
+            self._card("kept-base-hot", "1", "1", "0", "0"),
+            self._card("filtered-collection-zero", "2", "0", "0", "0"),
+            {"id": "incomplete", "note_card": {"display_title": "Incomplete", "interact_info": {"liked_count": "0"}}},
+        ]
+
+    @staticmethod
+    def _card(note_id, liked, collected, comment, shared):
+        return {
+            "id": note_id,
+            "note_card": {
+                "display_title": note_id,
+                "interact_info": {
+                    "liked_count": liked,
+                    "collected_count": collected,
+                    "comment_count": comment,
+                    "shared_count": shared,
+                },
+            },
+        }
+
+    def fetch_note(self, note_url):
+        self.detail_urls.append(note_url)
+        note_id = note_url.split("/explore/", 1)[1].split("?", 1)[0]
+        return {"note_id": note_id, "note_url": note_url, "title": note_id}
+
+
+class InteractionPaginationClient(InteractionFilteringClient):
+    def __init__(self):
+        super().__init__()
+        self.search_page_calls = []
+
+    def search_notes(
+        self,
+        query,
+        limit=20,
+        sort_type_choice=0,
+        note_type=0,
+        note_time=0,
+        with_detail=False,
+        page=1,
+        search_id=None,
+        return_meta=False,
+    ):
+        self.search_page_calls.append(page)
+        if page == 1:
+            items = [self._card("filtered-page-1", "0", "0", "0", "0")]
+            has_more = True
+        else:
+            items = [self._card("kept-page-2", "1", "1", "0", "0")]
+            has_more = False
+        return {
+            "items": items,
+            "page": page,
+            "search_id": search_id or "search-1",
+            "has_more": has_more,
+        }
+
+
 class PagedClient(FakeXhsClient):
     def __init__(self):
         super().__init__()
@@ -371,15 +439,77 @@ class XhsSourceTest(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "note detail page finished: page=1 notes=3 errors=0 candidates=4 has_more=False" in output
+                "note detail batch finished: page=1 notes=3 errors=0 remaining_candidates=1 has_more=False exhausted=False" in output
                 for output in logs.output
             )
         )
-        self.assertTrue(
-            any(
-                "legacy detail fetch limit: limit=3 eligible_candidates=4 selected_candidates=3" in output
-                for output in logs.output
+
+    def test_keyword_interaction_filter_skips_details_and_keeps_incomplete_data(self):
+        with TemporaryDirectory() as tmp:
+            client = InteractionFilteringClient()
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(False, (), 3),
             )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+
+            batch = source.start_collection().collect_next()
+
+        self.assertEqual(
+            [note.note_id for note in batch.notes],
+            ["kept-one-zero", "kept-base-hot", "incomplete"],
+        )
+        self.assertEqual(
+            [note.note_id for note in batch.filtered_notes],
+            ["filtered-all-zero", "filtered-two-zero", "filtered-collection-zero"],
+        )
+        self.assertEqual(
+            client.detail_urls,
+            [
+                "https://www.xiaohongshu.com/explore/kept-one-zero?xsec_source=pc_search",
+                "https://www.xiaohongshu.com/explore/kept-base-hot?xsec_source=pc_search",
+                "https://www.xiaohongshu.com/explore/incomplete?xsec_source=pc_search",
+            ],
+        )
+        self.assertEqual(
+            batch.filtered_notes[1].reason,
+            "low_interaction: liked=0, collected=1, comment=0, shared=2",
+        )
+
+    def test_homefeed_is_not_subject_to_keyword_interaction_filter(self):
+        with TemporaryDirectory() as tmp:
+            client = InteractionFilteringClient()
+            client.homefeed_notes = lambda category, limit=20, with_detail=False: [
+                InteractionFilteringClient._card("home-low", "0", "0", "0", "0")
+            ]
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(True, ("home",), 3),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+
+            batch = source.start_collection().collect_next()
+
+        self.assertIn("home-low", [note.note_id for note in batch.notes])
+        self.assertNotIn("home-low", [note.note_id for note in batch.filtered_notes])
+
+    def test_interaction_filters_are_returned_when_next_page_has_eligible_note(self):
+        with TemporaryDirectory() as tmp:
+            client = InteractionPaginationClient()
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
+                homefeed=HomefeedSourceConfig(False, (), 3),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+
+            batch = source.start_collection().collect_next()
+
+        self.assertEqual(client.search_page_calls, [1, 2])
+        self.assertEqual([item.note_id for item in batch.filtered_notes], ["filtered-page-1"])
+        self.assertEqual([item.note_id for item in batch.notes], ["kept-page-2"])
+        self.assertEqual(
+            client.detail_urls,
+            ["https://www.xiaohongshu.com/explore/kept-page-2?xsec_source=pc_search"],
         )
 
     def test_collect_sleeps_only_between_detail_fetches(self):

@@ -16,6 +16,7 @@ class PublishStatus(StrEnum):
     SENT = "sent"
     SENT_DEGRADED = "sent_degraded"
     FAILED = "failed"
+    FILTERED = "filtered"
     SKIPPED = "skipped"
 
 
@@ -53,6 +54,19 @@ class Note:
     @property
     def display_title(self) -> str:
         return self.title.strip() or "无标题"
+
+
+@dataclass(frozen=True)
+class FilteredNote:
+    note_id: str
+    url: str
+    title: str
+    source: SourceRef
+    liked_count: int
+    collected_count: int
+    comment_count: int
+    share_count: int
+    reason: str
 
 
 @dataclass(frozen=True)

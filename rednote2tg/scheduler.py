@@ -50,11 +50,8 @@ class PublishJobRunner:
         active_ids = self.store.active_note_ids()
         keywords = self.config.sources.keywords
         homefeed = self.config.sources.homefeed
-        queue_capacity = max(
-            1,
-            keywords.search_limit_per_query
-            + homefeed.limit_per_category * len(homefeed.categories),
-        )
+        batch_size = self.config.publishing.notes_per_run
+        queue_capacity = max(1, batch_size)
         note_events: Queue[tuple[str, Any]] = Queue(maxsize=queue_capacity)
         stop_fetching = Event()
         filtered_ids = set(active_ids)
@@ -62,6 +59,7 @@ class PublishJobRunner:
         published = 0
         published_media = 0
         skipped = 0
+        filtered = 0
         failed = 0
         failed_media = 0
         pending_retry_after_seconds: float | None = None
@@ -78,7 +76,7 @@ class PublishJobRunner:
             note_events.put(("note", note))
 
         async def produce_notes() -> None:
-            nonlocal collected_notes, skipped, errors, pagination_exhausted_before_target
+            nonlocal collected_notes, skipped, filtered, errors, pagination_exhausted_before_target
             try:
                 collection_factory = getattr(self.source, "start_collection", None)
                 collection = collection_factory(active_ids) if callable(collection_factory) else None
@@ -90,6 +88,7 @@ class PublishJobRunner:
                         batch = await asyncio.to_thread(
                             collection.collect_next,
                             active_note_ids=batch_active_ids,
+                            batch_size=batch_size,
                             on_note=enqueue_note,
                         )
                     else:
@@ -97,9 +96,24 @@ class PublishJobRunner:
                         batch_notes, batch_errors = await asyncio.to_thread(
                             self.source.collect,
                             active_note_ids=batch_active_ids,
+                            detail_limit=batch_size,
                             on_note=enqueue_note,
                         )
                         batch = CollectionBatch(tuple(batch_notes), tuple(batch_errors), True)
+                    if batch.filtered_notes:
+                        filtered += len(batch.filtered_notes)
+                        for filtered_note in batch.filtered_notes:
+                            self.store.record_filtered(
+                                filtered_note,
+                                self.config.dedup.ttl_days,
+                            )
+                            with filtered_ids_lock:
+                                filtered_ids.add(filtered_note.note_id)
+                        logger.info(
+                            "keyword interaction filters stored: count=%d ids=%s",
+                            len(batch.filtered_notes),
+                            [item.note_id for item in batch.filtered_notes],
+                        )
                     collected_notes += len(batch.notes)
                     skipped += getattr(self.source, "last_pre_detail_dedup_skipped", 0)
                     errors.extend(batch.errors)
@@ -108,7 +122,7 @@ class PublishJobRunner:
                         page_number,
                         len(batch.notes),
                         len(batch.errors),
-                        len(filtered_ids),
+                        len(batch.filtered_notes),
                         batch.exhausted,
                     )
                     await asyncio.to_thread(note_events.put, ("batch_done", batch))
@@ -253,6 +267,7 @@ class PublishJobRunner:
             "published": published,
             "published_media": published_media,
             "skipped": skipped,
+            "filtered": filtered,
             "failed": failed,
             "failed_media": failed_media,
             "source_errors": len(errors),
