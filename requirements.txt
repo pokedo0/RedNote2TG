@@ -2,4 +2,4 @@ aiogram>=3.30.0
 APScheduler>=3.11.3
 PyYAML>=6.0.3
 aiohttp>=3.14.3
-git+https://github.com/pokedo0/Spider_XHS.git@babc0e5e78e15ce4bb8dfa637f29575b2729281f
+git+https://github.com/pokedo0/Spider_XHS.git@21ac7d18524b95007bfa7faf7b5bb373df82bb91
