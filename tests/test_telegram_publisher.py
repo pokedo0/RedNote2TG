@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from aiogram.exceptions import TelegramRetryAfter
 
 from rednote2tg.models import DownloadedMedia, MediaItem, MediaType, Note, PublishStatus, SourceRef
-from rednote2tg.telegram_publisher import TelegramPublisher, chunk_media, render_caption
+from rednote2tg.telegram_publisher import TelegramPublisher, chunk_media, clean_note_url, render_caption
 
 
 class FakeBot:
@@ -105,10 +105,16 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("T &lt;1&gt;", caption)
         self.assertIn("D &amp; more", caption)
-        self.assertIn('<a href="https://xhs/n1?x=&lt;bad&gt;">原文</a>', caption)
+        self.assertIn('<a href="https://xhs/n1">原文</a>', caption)
+        self.assertNotIn("?x=&lt;bad&gt;", caption)
         self.assertNotIn("作者：A", caption)
         self.assertNotIn("时间：today", caption)
         self.assertNotIn("IP：Shanghai", caption)
+
+    def test_clean_note_url_strips_query_and_fragment(self):
+        url = "https://www.xiaohongshu.com/explore/6a2d79ff?xsec_token=abc&xsec_source=pc_search#comments"
+        self.assertEqual(clean_note_url(url), "https://www.xiaohongshu.com/explore/6a2d79ff")
+        self.assertEqual(clean_note_url("https://xhs/123"), "https://xhs/123")
 
     def test_caption_extracts_topics_into_bold_quote_block(self):
         note = sample_note()
@@ -156,7 +162,7 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         note = Note(**{**note.__dict__, "description": "长" * 205})
         caption = render_caption(note)
         description = caption.splitlines()[1]
-        self.assertEqual(len(description), 200)
+        self.assertEqual(len(description), 130)
         self.assertTrue(description.endswith("...."))
 
     def test_chunk_media_uses_size_ten(self):

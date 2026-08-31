@@ -7,6 +7,8 @@ from html import escape
 from pathlib import Path
 from typing import Any, ClassVar
 
+from urllib.parse import urlsplit, urlunsplit
+
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods.base import TelegramMethod
 from aiogram.types import Message
@@ -206,8 +208,15 @@ def render_caption(note: Note) -> str:
     counts = _counts_line(note)
     if counts:
         lines.append(counts)
-    lines.append(f'<a href="{escape(note.url, quote=True)}">原文</a>')
+    lines.append(f'<a href="{escape(clean_note_url(note.url), quote=True)}">原文</a>')
     return "\n".join(lines)
+
+
+def clean_note_url(url: str) -> str:
+    parts = urlsplit(url)
+    if not parts.query and not parts.fragment:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _retry_after_failure(exc: TelegramRetryAfter) -> PublishResult:
