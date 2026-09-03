@@ -69,6 +69,7 @@ When adding a new bot command:
 Current commands:
 
 - `/run_once`: run one collect-and-publish pass.
+- `/homefeed`: test homefeed recommendation fetch without publishing (or `/homefeed publish` to publish).
 - `/status`: show scheduler and recent publish status.
 - `/start_tasks`: start scheduled tasks.
 - `/stop_tasks`: stop scheduled tasks.

@@ -42,7 +42,7 @@ class PublishJobRunner:
         self.downloader = downloader
         self.publisher = publisher
 
-    async def run_once(self) -> dict[str, Any]:
+    async def run_once(self, source_type: str | None = None) -> dict[str, Any]:
         started_at = perf_counter()
         retry_after_start = getattr(self.publisher, "telegram_retry_after_count", 0)
         logger.info("run_once started")
@@ -68,6 +68,7 @@ class PublishJobRunner:
         collected_notes = 0
         errors = []
         pagination_exhausted_before_target = False
+        session_source = source_type or "keyword"
 
         def enqueue_note(note) -> None:
             with filtered_ids_lock:
@@ -76,10 +77,18 @@ class PublishJobRunner:
             note_events.put(("note", note))
 
         async def produce_notes() -> None:
-            nonlocal collected_notes, skipped, filtered, errors, pagination_exhausted_before_target
+            nonlocal collected_notes, skipped, filtered, errors, pagination_exhausted_before_target, session_source
             try:
                 collection_factory = getattr(self.source, "start_collection", None)
-                collection = collection_factory(active_ids) if callable(collection_factory) else None
+                if callable(collection_factory):
+                    try:
+                        collection = collection_factory(active_ids, source_type=source_type)
+                    except TypeError:
+                        collection = collection_factory(active_ids)
+                else:
+                    collection = None
+                session_source = getattr(collection, "source_type", session_source)
+                logger.info("publish run session started: source=%s", session_source)
                 page_number = 1
                 while True:
                     with filtered_ids_lock:
@@ -263,7 +272,14 @@ class PublishJobRunner:
         elapsed_seconds = perf_counter() - started_at
         keyword_query = getattr(self.source, "last_keyword_query", None)
         keyword_rule = getattr(self.source, "last_keyword_rule_name", "")
+        homefeed_category = getattr(
+            getattr(getattr(self.source, "sources_config", None), "homefeed", None),
+            "category",
+            "homefeed.fashion_v3",
+        )
         summary: dict[str, Any] = {
+            "source_type": session_source,
+            "homefeed_category": homefeed_category,
             "published": published,
             "published_media": published_media,
             "skipped": skipped,
@@ -333,10 +349,10 @@ class RuntimeState:
         except Exception:
             logger.exception("failed to write merged XHS cookies back to config")
 
-    async def run_once(self) -> dict[str, Any]:
+    async def run_once(self, source_type: str | None = None) -> dict[str, Any]:
         async with self.lock:
             try:
-                return await self.runner.run_once()
+                return await self.runner.run_once(source_type=source_type)
             finally:
                 self.persist_merged_cookies()
 
@@ -479,13 +495,25 @@ async def handle_runtime_run_once(message, state: RuntimeState) -> None:
 
 
 def format_run_once_summary(result: dict[str, Any]) -> str:
+    source_type = result.get("source_type") or (
+        "homefeed" if not result.get("keyword_query") and result.get("homefeed_category") else "keyword"
+    )
+    if source_type == "homefeed":
+        source_line = f"  homefeed category={result.get('homefeed_category') or '-'}"
+    else:
+        source_line = (
+            f"  keyword rule={result.get('keyword_rule') or '-'} "
+            f"query={result.get('keyword_query') or '-'} "
+            f"time_filter={result.get('keyword_time_filter') or '-'}"
+        )
     return (
         "run_once done:\n"
+        f"  source={source_type}\n"
         f"  source_collected notes={result['source_collected_notes']} errors={result['source_collected_errors']}\n"
         f"  publish published={result['published']}(media={result.get('published_media', 0)}) "
         f"skipped={result['skipped']} failed={result['failed']}(media={result.get('failed_media', 0)}) "
         f"source_errors={result['source_errors']}\n"
-        f"  keyword rule={result.get('keyword_rule') or '-'} query={result['keyword_query'] or '-'} time_filter={result['keyword_time_filter']}\n"
+        f"{source_line}\n"
         f"  TelegramRetryAfter count={result.get('telegram_retry_after_count', 0)}\n"
         f"  elapsed={result['elapsed_seconds']:.3f}s"
     )
@@ -621,6 +649,116 @@ async def handle_fetch_note(message, state: RuntimeState) -> None:
                 await message.answer(f"发送失败：{result.error_message or 'unknown'}")
         finally:
             state.persist_merged_cookies()
+
+
+async def handle_homefeed(message, state: RuntimeState) -> None:
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if not is_authorized(user_id, state.config.telegram.admin_user_ids):
+        await message.answer("unauthorized")
+        return
+
+    text = (getattr(message, "text", "") or "").strip()
+    parts = text.split()[1:]
+
+    # 如果带参数 publish 或 run，则触发一次 homefeed 的采集并发布到频道
+    if parts and parts[0].lower() in {"publish", "run"}:
+        await message.answer("🚀 正在执行一次 Homefeed 采集并发布...")
+        result = await state.run_once(source_type="homefeed")
+        await message.answer(format_run_once_summary(result))
+        return
+
+    category = parts[0] if parts else state.config.sources.homefeed.category
+    limit = state.config.sources.homefeed.limit_per_page
+    need_num = min(10, limit)
+
+    client = state.runner.source.client
+    if client is None:
+        await message.answer("❌ XHS 客户端未初始化（Cookie 可能已过期）")
+        return
+
+    raw_api = getattr(client, "raw", client)
+    fetch_func = getattr(raw_api, "get_homefeed_recommend", None) or getattr(client, "get_homefeed_recommend", None)
+    if not callable(fetch_func):
+        await message.answer("❌ 当前 XHS 客户端不支持 get_homefeed_recommend 接口")
+        return
+
+    started_at = perf_counter()
+    async with state.lock:
+        try:
+            try:
+                success, msg, res_json = await asyncio.to_thread(
+                    fetch_func,
+                    category,
+                    "",
+                    1,
+                    0,
+                    num=limit,
+                    need_num=need_num,
+                )
+            except TypeError:
+                success, msg, res_json = await asyncio.to_thread(
+                    fetch_func,
+                    category,
+                    "",
+                    1,
+                    0,
+                )
+        except Exception as exc:
+            logger.exception("homefeed test fetch failed: category=%s", category)
+            await message.answer(f"❌ 抓取异常: {exc}")
+            return
+        finally:
+            state.persist_merged_cookies()
+
+    elapsed = perf_counter() - started_at
+    if not success:
+        await message.answer(f"❌ 抓取失败: {msg} (耗时 {elapsed:.2f}s)")
+        return
+
+    data = res_json.get("data") if isinstance(res_json, dict) else {}
+    items = data.get("items") or []
+    cursor = str(data.get("cursor_score") or "")
+
+    sample_lines = []
+    for idx, item in enumerate(items, 1):
+        note_card = item.get("note_card") if isinstance(item, dict) else {}
+        title = str(note_card.get("display_title") or note_card.get("title") or item.get("title") or "<无标题>")
+        note_id = str(item.get("id") or item.get("note_id") or "")
+        user_name = str(note_card.get("user", {}).get("nickname") or "")
+        interact = note_card.get("interact_info") or {}
+        likes = interact.get("liked_count", "0")
+        card_type = "视频" if note_card.get("type") == "video" else "图文"
+        author_str = f" | 👤 {user_name}" if user_name else ""
+        sample_lines.append(f"{idx}. [{card_type}] {title}\n   ID: {note_id}{author_str} | ❤️ {likes}")
+
+    cursor_display = f"{cursor[:18]}..." if len(cursor) > 18 else (cursor or "-")
+    header = (
+        f"✅ Homefeed 抓取测试成功（耗时 {elapsed:.2f}s）:\n"
+        f"• category: {category}\n"
+        f"• 返回数量: {len(items)} 条 (请求 num={limit})\n"
+        f"• 下次游标: {cursor_display}\n\n"
+        f"📝 笔记列表 (共 {len(items)} 条):\n"
+    )
+    footer = "\n💡 提示：如需抓取并推送到频道，请使用 /homefeed publish"
+
+    if not sample_lines:
+        await message.answer(header + "（无返回条目）" + footer)
+        return
+
+    # Telegram 单条消息上限 4096 字符，安全分片发送
+    chunks: list[str] = []
+    current_text = header
+    for line in sample_lines:
+        if len(current_text) + len(line) + len(footer) + 2 > 3800:
+            chunks.append(current_text)
+            current_text = line + "\n"
+        else:
+            current_text += line + "\n"
+    current_text += footer
+    chunks.append(current_text)
+
+    for chunk in chunks:
+        await message.answer(chunk)
 
 
 def extract_xhs_url(text: str) -> str | None:
@@ -906,6 +1044,10 @@ def register_handlers(dispatcher, state: RuntimeState) -> None:
     @dispatcher.message(Command("run_once"))
     async def _run_once(message):
         await handle_runtime_run_once(message, state)
+
+    @dispatcher.message(Command("homefeed"))
+    async def _homefeed(message):
+        await handle_homefeed(message, state)
 
     @dispatcher.message(Command("status"))
     async def _status(message):

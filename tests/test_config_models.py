@@ -27,7 +27,7 @@ def base_config():
                 "rules_path": "keyword_rules.yaml",
                 "search_limit_per_query": 20,
             },
-            "homefeed": {"enabled": False, "categories": ["homefeed_recommend"]},
+            "homefeed": {"enabled": False, "weight": 1.0, "limit_per_page": 20},
         },
         "publishing": {"notes_per_run": 3},
         "dedup": {"ttl_days": 14},
@@ -352,6 +352,46 @@ class ConfigModelsTest(unittest.TestCase):
         data = base_config()
         data["schedule"]["quiet_window"] = {"start": "03:00", "end": "03:00"}
 
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_sources_weights_and_limit_per_page_accepted(self):
+        data = base_config()
+        data["sources"]["keywords"]["weight"] = 0.8
+        data["sources"]["homefeed"] = {"enabled": True, "weight": 0.2, "limit_per_page": 30}
+        config = parse_config(data)
+        self.assertEqual(config.sources.keywords.weight, 0.8)
+        self.assertEqual(config.sources.homefeed.weight, 0.2)
+        self.assertEqual(config.sources.homefeed.limit_per_page, 30)
+
+    def test_sources_homefeed_custom_category_and_tag_alias(self):
+        data = base_config()
+        data["sources"]["homefeed"] = {"weight": 0.5, "tag": "homefeed.fashion_v3"}
+        config = parse_config(data)
+        self.assertEqual(config.sources.homefeed.category, "homefeed.fashion_v3")
+        self.assertEqual(config.sources.homefeed.tag, "homefeed.fashion_v3")
+
+        data["sources"]["homefeed"] = {"weight": 0.5, "category": "homefeed.cosmetics_v3"}
+        config2 = parse_config(data)
+        self.assertEqual(config2.sources.homefeed.category, "homefeed.cosmetics_v3")
+
+    def test_sources_rejects_limit_per_page_over_40(self):
+        data = base_config()
+        data["sources"]["homefeed"] = {"enabled": True, "limit_per_page": 41}
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_sources_rejects_both_weights_zero(self):
+        data = base_config()
+        data["sources"]["keywords"]["weight"] = 0.0
+        data["sources"]["homefeed"] = {"enabled": True, "weight": 0.0, "limit_per_page": 20}
+        with self.assertRaises(ConfigError):
+            parse_config(data)
+
+    def test_sources_rejects_both_sources_disabled(self):
+        data = base_config()
+        data["sources"]["keywords"]["enabled"] = False
+        data["sources"]["homefeed"]["enabled"] = False
         with self.assertRaises(ConfigError):
             parse_config(data)
 

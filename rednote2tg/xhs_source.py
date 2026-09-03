@@ -86,8 +86,37 @@ class XhsSource:
         self.last_keyword_rule_name = ""
         self.last_pre_detail_dedup_skipped = 0
 
-    def start_collection(self, active_note_ids: set[str] | None = None) -> "XhsCollectionSession":
-        return XhsCollectionSession(self, active_note_ids or set())
+    def _select_source_type(self) -> str:
+        kw_weight = max(0.0, self.sources_config.keywords.weight)
+        hf_weight = max(0.0, self.sources_config.homefeed.weight)
+        total = kw_weight + hf_weight
+        if total <= 0:
+            logger.warning("both keyword and homefeed weights <= 0, no source available")
+            return "none"
+        if kw_weight > 0 and hf_weight <= 0:
+            return "keyword"
+        if hf_weight > 0 and kw_weight <= 0:
+            return "homefeed"
+
+        threshold = self.rng.random() * total
+        chosen = "keyword" if threshold <= kw_weight else "homefeed"
+        logger.info(
+            "source selected by weight: chosen=%s kw_weight=%s hf_weight=%s total=%s roll=%s",
+            chosen,
+            kw_weight,
+            hf_weight,
+            total,
+            threshold,
+        )
+        return chosen
+
+    def start_collection(
+        self,
+        active_note_ids: set[str] | None = None,
+        source_type: str | None = None,
+    ) -> "XhsCollectionSession":
+        resolved_source_type = source_type or self._select_source_type()
+        return XhsCollectionSession(self, active_note_ids or set(), source_type=resolved_source_type)
 
     @staticmethod
     def _create_client(xhs_config: XhsConfig) -> XhsClientProtocol | None:
@@ -241,18 +270,28 @@ class XhsSource:
 
 
 class XhsCollectionSession:
-    """Collect one keyword search across pages without changing its query context."""
+    """Collect one keyword search or homefeed batch across pages."""
 
-    def __init__(self, source: XhsSource, active_note_ids: set[str]):
+    def __init__(
+        self,
+        source: XhsSource,
+        active_note_ids: set[str],
+        source_type: str = "keyword",
+    ):
         self.source = source
         self.active_note_ids = set(active_note_ids)
+        self.source_type = source_type
         self.page = 1
         self.current_page = 0
         self.search_id: str | None = None
-        self.exhausted = False
+        self.exhausted = (source_type == "none")
         self._keyword_initialized = False
         self._keyword_has_more = True
-        self._homefeed_loaded = False
+        self._homefeed_cursor_score = ""
+        self._homefeed_refresh_type = 1
+        self._homefeed_note_index = 0
+        self._homefeed_page = 1
+        self._homefeed_has_more = True
         self._seen_note_ids: set[str] = set()
         self._candidate_buffer: Deque[_DetailCandidate] = deque()
         self._current_page_has_more = False
@@ -286,12 +325,23 @@ class XhsCollectionSession:
 
         errors: list[SourceError] = []
         while not self._candidate_buffer:
-            if not self._keyword_initialized:
-                page_errors = self._load_initial_page()
-                errors.extend(page_errors)
-            elif self._current_page_has_more:
-                page_errors = self._load_next_keyword_page()
-                errors.extend(page_errors)
+            if self.source_type == "keyword":
+                if not self._keyword_initialized:
+                    page_errors = self._load_initial_page()
+                    errors.extend(page_errors)
+                elif self._current_page_has_more:
+                    page_errors = self._load_next_keyword_page()
+                    errors.extend(page_errors)
+                else:
+                    self.exhausted = True
+                    return self._make_batch((), errors, True)
+            elif self.source_type == "homefeed":
+                if self._homefeed_has_more:
+                    page_errors = self._load_next_homefeed_page()
+                    errors.extend(page_errors)
+                else:
+                    self.exhausted = True
+                    return self._make_batch((), errors, True)
             else:
                 self.exhausted = True
                 return self._make_batch((), errors, True)
@@ -308,7 +358,8 @@ class XhsCollectionSession:
                 for _ in range(min(batch_size, len(self._candidate_buffer)))
             ]
         logger.info(
-            "note detail batch selected: page=%d batch_size=%s selected=%d remaining_candidates=%d has_more=%s",
+            "note detail batch selected: source=%s page=%d batch_size=%s selected=%d remaining_candidates=%d has_more=%s",
+            self.source_type,
             self.current_page,
             batch_size if batch_size is not None else "all",
             len(selected_candidates),
@@ -345,9 +396,15 @@ class XhsCollectionSession:
             if on_note is not None:
                 on_note(note)
 
-        self.exhausted = not self._candidate_buffer and not self._current_page_has_more
+        if self.source_type == "keyword":
+            self.exhausted = not self._candidate_buffer and not self._current_page_has_more
+        elif self.source_type == "homefeed":
+            self.exhausted = not self._candidate_buffer and not self._homefeed_has_more
+        else:
+            self.exhausted = True
         logger.info(
-            "note detail batch finished: page=%d notes=%d errors=%d remaining_candidates=%d has_more=%s exhausted=%s",
+            "note detail batch finished: source=%s page=%d notes=%d errors=%d remaining_candidates=%d has_more=%s exhausted=%s",
+            self.source_type,
             self.current_page,
             len(notes),
             len(errors),
@@ -369,29 +426,101 @@ class XhsCollectionSession:
 
     def _load_initial_page(self) -> list[SourceError]:
         errors: list[SourceError] = []
-        if self.source.sources_config.keywords.enabled:
+        if self.source.sources_config.keywords.weight > 0:
             page, page_errors = self._fetch_keyword_page()
             errors.extend(page_errors)
             self._accept_keyword_page(page)
         self._keyword_initialized = True
-
-        if not self._homefeed_loaded and self.source.sources_config.homefeed.enabled:
-            self._homefeed_loaded = True
-            for category in self.source.sources_config.homefeed.categories:
-                try:
-                    items = self.source.client.homefeed_notes(
-                        category,
-                        limit=self.source.sources_config.homefeed.limit_per_category,
-                        with_detail=False,
-                    )
-                    self._candidate_buffer.extend(
-                        self._eligible_candidates(items, SourceRef("homefeed", category), "pc_feed")
-                    )
-                except Exception as exc:  # pragma: no cover - exact XHS exceptions vary.
-                    logger.exception("homefeed source failed: %s", category)
-                    errors.append(SourceError("homefeed", category, str(exc)))
-        if not self.source.sources_config.keywords.enabled:
+        if self.source.sources_config.keywords.weight <= 0:
             self._current_page_has_more = False
+        return errors
+
+    def _load_next_homefeed_page(self) -> list[SourceError]:
+        errors: list[SourceError] = []
+        category = self.source.sources_config.homefeed.category
+        num = self.source.sources_config.homefeed.limit_per_page
+        need_num = min(10, num)
+        refresh_type = self._homefeed_refresh_type
+        cursor_score = self._homefeed_cursor_score
+        note_index = self._homefeed_note_index
+        page = self._homefeed_page
+
+        logger.info(
+            "homefeed request: page=%d category=%s refresh_type=%d note_index=%d cursor_score=%s num=%d need_num=%d",
+            page,
+            category,
+            refresh_type,
+            note_index,
+            cursor_score,
+            num,
+            need_num,
+        )
+        try:
+            raw_api = getattr(self.source.client, "raw", self.source.client)
+            fetch_func = getattr(raw_api, "get_homefeed_recommend", None)
+            if not callable(fetch_func):
+                fetch_func = getattr(self.source.client, "get_homefeed_recommend", None)
+
+            if callable(fetch_func):
+                try:
+                    success, msg, res_json = fetch_func(
+                        category,
+                        cursor_score,
+                        refresh_type,
+                        note_index,
+                        num=num,
+                        need_num=need_num,
+                    )
+                except TypeError:
+                    success, msg, res_json = fetch_func(
+                        category,
+                        cursor_score,
+                        refresh_type,
+                        note_index,
+                    )
+                if not success:
+                    logger.error("homefeed request failed: page=%d category=%s error=%s", page, category, msg)
+                    errors.append(SourceError("homefeed", category, str(msg)))
+                    self._homefeed_has_more = False
+                    self._current_page_has_more = False
+                    return errors
+                data = res_json.get("data") if isinstance(res_json, dict) else {}
+                items = data.get("items") or []
+                new_cursor = str(data.get("cursor_score") or "")
+            else:
+                logger.warning("get_homefeed_recommend not found on client; falling back to homefeed_notes")
+                items = self.source.client.homefeed_notes(category, limit=num, with_detail=False)
+                new_cursor = ""
+        except Exception as exc:
+            logger.exception("homefeed source failed: page=%d category=%s", page, category)
+            errors.append(SourceError("homefeed", category, str(exc)))
+            self._homefeed_has_more = False
+            self._current_page_has_more = False
+            return errors
+
+        self.current_page = page
+        self._homefeed_refresh_type = 3
+        self._homefeed_cursor_score = new_cursor
+        self._homefeed_note_index += len(items)
+        self._homefeed_page += 1
+
+        has_more = data.get("has_more") if isinstance(data, dict) else None
+        if not items or has_more is False:
+            logger.info("homefeed returned empty items or has_more is False, end of feed: page=%d", page)
+            self._homefeed_has_more = False
+        else:
+            candidates = self._eligible_candidates(list(items), SourceRef("homefeed", category), "pc_feed")
+            self._candidate_buffer.extend(candidates)
+            logger.info(
+                "homefeed page accepted: page=%d items=%d candidates=%d remaining_candidates=%d next_cursor=%s next_note_index=%d next_refresh_type=3",
+                page,
+                len(items),
+                len(candidates),
+                len(self._candidate_buffer),
+                new_cursor,
+                self._homefeed_note_index,
+            )
+        self._current_page_has_more = self._homefeed_has_more
         return errors
 
     def _load_next_keyword_page(self) -> list[SourceError]:
@@ -538,13 +667,14 @@ class XhsCollectionSession:
                 logger.info("note skipped before detail: note_id=%s reason=run_dedup", candidate.note_id)
                 continue
             self._seen_note_ids.add(candidate.note_id)
-            if candidate.source.source_type == "keyword":
+            if candidate.source.source_type in {"keyword", "homefeed"}:
                 filtered_note = self._low_interaction_filter(candidate)
                 if filtered_note is not None:
                     self._pending_filtered_notes.append(filtered_note)
                     logger.info(
-                        "note skipped before detail: note_id=%s reason=%s liked=%d collected=%d comment=%d shared=%d",
+                        "note skipped before detail: note_id=%s source=%s reason=%s liked=%d collected=%d comment=%d shared=%d",
                         candidate.note_id,
+                        candidate.source.source_type,
                         filtered_note.reason,
                         filtered_note.liked_count,
                         filtered_note.collected_count,
@@ -560,7 +690,7 @@ class XhsCollectionSession:
         note_card = item.get("note_card")
         interact_info = note_card.get("interact_info") if isinstance(note_card, dict) else None
         if not isinstance(interact_info, dict):
-            logger.info(
+            logger.debug(
                 "interaction filter skipped: note_id=%s reason=incomplete_interact_info",
                 candidate.note_id,
             )
@@ -578,7 +708,7 @@ class XhsCollectionSession:
             else:
                 value = None
             if value is None:
-                logger.info(
+                logger.debug(
                     "interaction filter skipped: note_id=%s reason=incomplete_interact_info field=%s",
                     candidate.note_id,
                     key,

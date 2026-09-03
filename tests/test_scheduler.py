@@ -30,6 +30,7 @@ from rednote2tg.scheduler import (
     extract_xhs_url,
     format_run_once_summary,
     handle_fetch_note,
+    handle_homefeed,
     handle_ping,
     handle_reload,
     handle_run_once,
@@ -1153,8 +1154,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             data["sources"]["keywords"]["search_limit_per_query"] = 7
             data["sources"]["homefeed"] = {
                 "enabled": True,
-                "categories": ["homefeed_recommend"],
-                "limit_per_category": 5,
+                "limit_per_page": 5,
             }
             data["publishing"]["notes_per_run"] = 7
             data["publishing"]["telegram_retry_after_padding_seconds"] = 10
@@ -1415,6 +1415,112 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("❌ Cookie 已失效或请求异常", message.answers[0])
             self.assertIn('cookies: "loadts=123;xsecappid=xhs-pc-web"', config_path.read_text(encoding="utf-8"))
+            store.close()
+
+    def test_format_run_once_summary_homefeed(self):
+        result = {
+            "source_type": "homefeed",
+            "homefeed_category": "homefeed.fashion_v3",
+            "source_collected_notes": 19,
+            "source_collected_errors": 0,
+            "published": 18,
+            "published_media": 81,
+            "skipped": 0,
+            "failed": 1,
+            "failed_media": 2,
+            "source_errors": 0,
+            "telegram_retry_after_count": 0,
+            "elapsed_seconds": 256.843,
+        }
+        text = format_run_once_summary(result)
+        self.assertIn("run_once done:", text)
+        self.assertIn("source=homefeed", text)
+        self.assertIn("homefeed category=homefeed.fashion_v3", text)
+        self.assertNotIn("keyword rule", text)
+
+    async def test_handle_homefeed_unauthorized(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([])
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None)
+            message = FakeMessage(999)  # not in admin_user_ids (1, 2)
+
+            await handle_homefeed(message, state)
+
+            self.assertEqual(message.answers, ["unauthorized"])
+            store.close()
+
+    async def test_handle_homefeed_test_fetch_success(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([])
+            fake_client = Mock()
+            fake_client.raw.get_homefeed_recommend.return_value = (
+                True,
+                "ok",
+                {
+                    "data": {
+                        "cursor_score": "12345678",
+                        "items": [
+                            {
+                                "id": "note_123",
+                                "note_card": {
+                                    "title": "时尚穿搭",
+                                    "type": "video",
+                                    "user": {"nickname": "博主A"},
+                                    "interact_info": {"liked_count": "99"},
+                                },
+                            }
+                        ],
+                    }
+                },
+            )
+            fake_client.merged_cookie_header.return_value = None
+            source.client = fake_client
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None)
+            message = FakeMessage(1, "/homefeed")
+
+            await handle_homefeed(message, state)
+
+            self.assertEqual(len(message.answers), 1)
+            self.assertIn("Homefeed 抓取测试成功", message.answers[0])
+            self.assertIn("时尚穿搭", message.answers[0])
+            self.assertIn("note_123", message.answers[0])
+            self.assertIn("博主A", message.answers[0])
+            store.close()
+
+    async def test_handle_homefeed_publish_calls_run_once(self):
+        config = parse_config(base_config())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = NoteStore(Path(tmp) / "db.sqlite")
+            source = FakeSource([])
+            runner = PublishJobRunner(config, source, store, FakeDownloader(), FakePublisher())
+            state = RuntimeState(config, runner, store, None)
+            state.run_once = AsyncMock(return_value={
+                "source_type": "homefeed",
+                "homefeed_category": "homefeed.fashion_v3",
+                "source_collected_notes": 1,
+                "source_collected_errors": 0,
+                "published": 1,
+                "published_media": 1,
+                "skipped": 0,
+                "failed": 0,
+                "failed_media": 0,
+                "source_errors": 0,
+                "elapsed_seconds": 1.5,
+            })
+            message = FakeMessage(1, "/homefeed publish")
+
+            await handle_homefeed(message, state)
+
+            state.run_once.assert_awaited_once_with(source_type="homefeed")
+            self.assertEqual(len(message.answers), 2)
+            self.assertIn("正在执行一次 Homefeed 采集并发布", message.answers[0])
+            self.assertIn("source=homefeed", message.answers[1])
             store.close()
 
 

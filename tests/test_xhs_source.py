@@ -1,3 +1,4 @@
+import random
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -37,10 +38,38 @@ class FakeXhsClient:
         self.calls.append(("homefeed", category, limit, with_detail))
         return [{"note_id": f"{category}-1", "url": f"https://xhs/{category}-1", "video_addr": "https://v/1.mp4"}]
 
+    def get_homefeed_recommend(self, category, cursor_score, refresh_type, note_index, *, num=20, need_num=10):
+        self.calls.append(("get_homefeed_recommend", category, cursor_score, refresh_type, note_index, num, need_num))
+        return True, "success", {
+            "data": {
+                "items": [
+                    {
+                        "note_id": f"{category}-1",
+                        "url": f"https://xhs/{category}-1",
+                        "video_addr": "https://v/1.mp4",
+                        "note_card": {
+                            "interact_info": {
+                                "liked_count": "100",
+                                "collected_count": "50",
+                                "comment_count": "20",
+                                "shared_count": "10",
+                            }
+                        },
+                    }
+                ],
+                "cursor_score": f"cursor-{category}",
+            }
+        }
+
     def fetch_note(self, note_url):
         self.calls.append(("fetch_note", note_url))
+        note_id = "manual-1"
+        if "/" in note_url:
+            candidate_id = note_url.split("?")[0].rstrip("/").split("/")[-1]
+            if candidate_id:
+                note_id = candidate_id
         return {
-            "note_id": "manual-1",
+            "note_id": note_id,
             "note_url": note_url,
             "title": "Manual",
             "desc": "Text",
@@ -87,13 +116,7 @@ class DetailLimitClient(FakeXhsClient):
             {"note_id": "published-1"},
             {"note_id": "keyword-1"},
             {"note_id": "keyword-2"},
-        ]
-
-    def homefeed_notes(self, category, limit=20, with_detail=False):
-        self.calls.append(("homefeed", category, limit, with_detail))
-        return [
-            {"note_id": "home-1"},
-            {"note_id": "home-2"},
+            {"note_id": "keyword-3"},
         ]
 
     def fetch_note(self, note_url):
@@ -271,10 +294,10 @@ time_weights:
     return str(path)
 
 
-def source_config(rules_path: str, detail_fetch: DetailFetchConfig | None = None):
+def source_config(rules_path: str, detail_fetch: DetailFetchConfig | None = None, homefeed_enabled: bool = False):
     return SourcesConfig(
-        keywords=KeywordSourceConfig(True, rules_path, 5, 1, 2),
-        homefeed=HomefeedSourceConfig(True, ("home",), 3),
+        keywords=KeywordSourceConfig(rules_path=rules_path, search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+        homefeed=HomefeedSourceConfig(weight=1.0 if homefeed_enabled else 0.0, limit_per_page=3),
         detail_fetch=detail_fetch or DetailFetchConfig(),
     )
 
@@ -282,7 +305,6 @@ def source_config(rules_path: str, detail_fetch: DetailFetchConfig | None = None
 def weighted_source_config(rules_a_path: str, rules_b_path: str):
     return SourcesConfig(
         keywords=KeywordSourceConfig(
-            enabled=True,
             search_limit_per_query=5,
             sort_type=1,
             note_type=2,
@@ -290,8 +312,9 @@ def weighted_source_config(rules_a_path: str, rules_b_path: str):
                 KeywordRuleSourceConfig("A", 0.7, rules_a_path),
                 KeywordRuleSourceConfig("B", 0.3, rules_b_path),
             ),
+            weight=1.0,
         ),
-        homefeed=HomefeedSourceConfig(False, (), 3),
+        homefeed=HomefeedSourceConfig(weight=0.0, limit_per_page=3),
     )
 
 
@@ -362,26 +385,28 @@ class XhsSourceTest(unittest.TestCase):
         self.assertIn("search_notes", errors[0].message)
         self.assertIn("request blocked", errors[0].message)
 
-    def test_collects_keyword_and_homefeed_notes(self):
+    def test_collects_homefeed_notes(self):
         with TemporaryDirectory() as tmp:
             client = FakeXhsClient()
-            source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)), client=client)
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), weight=0.0),
+                homefeed=HomefeedSourceConfig(weight=1.0, limit_per_page=3),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
 
             notes, errors = source.collect()
 
         self.assertEqual(errors, [])
-        self.assertEqual([note.source.source_type for note in notes], ["keyword", "homefeed"])
-        self.assertEqual(client.calls[0], ("search", "a b c", 5, 1, 2, 2, False))
-        self.assertEqual(client.calls[1], ("homefeed", "home", 3, False))
-        self.assertEqual(client.calls[2][0], "fetch_note")
-        self.assertEqual(client.calls[3][0], "fetch_note")
+        self.assertEqual([note.source.source_type for note in notes], ["homefeed"])
+        self.assertEqual(client.calls[0][0], "get_homefeed_recommend")
+        self.assertEqual(client.calls[1][0], "fetch_note")
 
     def test_collection_session_reuses_keyword_and_search_id_across_pages(self):
         with TemporaryDirectory() as tmp:
             client = PagedClient()
             config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(False, (), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0),
             )
             source = XhsSource(XhsConfig("cookie"), config, client=client)
             session = source.start_collection()
@@ -403,8 +428,8 @@ class XhsSourceTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             client = DetailFilteringClient()
             config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(False, (), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0),
             )
             source = XhsSource(XhsConfig("cookie"), config, client=client)
 
@@ -424,21 +449,20 @@ class XhsSourceTest(unittest.TestCase):
             source = XhsSource(XhsConfig("cookie"), source_config(write_rules(tmp)), client=client)
 
             with self.assertLogs("rednote2tg.xhs_source", level="INFO") as logs:
-                notes, errors = source.collect(active_note_ids={"published-1"}, detail_limit=3)
+                notes, errors = source.collect(active_note_ids={"published-1"}, detail_limit=2)
 
         self.assertEqual(errors, [])
-        self.assertEqual([note.note_id for note in notes], ["keyword-1", "keyword-2", "home-1"])
+        self.assertEqual([note.note_id for note in notes], ["keyword-1", "keyword-2"])
         self.assertEqual(
             client.detail_urls,
             [
                 "https://www.xiaohongshu.com/explore/keyword-1?xsec_source=pc_search",
                 "https://www.xiaohongshu.com/explore/keyword-2?xsec_source=pc_search",
-                "https://www.xiaohongshu.com/explore/home-1?xsec_source=pc_feed",
             ],
         )
         self.assertTrue(
             any(
-                "note detail batch finished: page=1 notes=3 errors=0 remaining_candidates=1 has_more=False exhausted=False" in output
+                "note detail batch finished: source=keyword page=1 notes=2 errors=0 remaining_candidates=1 has_more=False exhausted=False" in output
                 for output in logs.output
             )
         )
@@ -447,8 +471,8 @@ class XhsSourceTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             client = InteractionFilteringClient()
             config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(False, (), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0),
             )
             source = XhsSource(XhsConfig("cookie"), config, client=client)
 
@@ -475,29 +499,41 @@ class XhsSourceTest(unittest.TestCase):
             "low_interaction: liked=0, collected=1, comment=0, shared=2",
         )
 
-    def test_homefeed_is_not_subject_to_keyword_interaction_filter(self):
+    def test_homefeed_is_subject_to_interaction_filter(self):
         with TemporaryDirectory() as tmp:
-            client = InteractionFilteringClient()
-            client.homefeed_notes = lambda category, limit=20, with_detail=False: [
-                InteractionFilteringClient._card("home-low", "0", "0", "0", "0")
-            ]
+            client = FakeXhsClient()
+            calls = 0
+            def mock_feed(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls > 1:
+                    return True, "ok", {"data": {"items": [], "cursor_score": ""}}
+                return True, "ok", {
+                    "data": {
+                        "items": [
+                            InteractionFilteringClient._card("home-low", "0", "0", "0", "0")
+                        ],
+                        "cursor_score": "c1",
+                    }
+                }
+            client.get_homefeed_recommend = mock_feed
             config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(True, ("home",), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), weight=0.0),
+                homefeed=HomefeedSourceConfig(weight=1.0, limit_per_page=3),
             )
             source = XhsSource(XhsConfig("cookie"), config, client=client)
 
             batch = source.start_collection().collect_next()
 
-        self.assertIn("home-low", [note.note_id for note in batch.notes])
-        self.assertNotIn("home-low", [note.note_id for note in batch.filtered_notes])
+        self.assertEqual(len(batch.notes), 0)
+        self.assertIn("home-low", [note.note_id for note in batch.filtered_notes])
 
     def test_interaction_filters_are_returned_when_next_page_has_eligible_note(self):
         with TemporaryDirectory() as tmp:
             client = InteractionPaginationClient()
             config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(False, (), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0),
             )
             source = XhsSource(XhsConfig("cookie"), config, client=client)
 
@@ -514,6 +550,13 @@ class XhsSourceTest(unittest.TestCase):
     def test_collect_sleeps_only_between_detail_fetches(self):
         with TemporaryDirectory() as tmp:
             client = FakeXhsClient()
+            def fake_search(query, *args, **kwargs):
+                client.calls.append(("search", query))
+                return [
+                    {"note_id": f"{query}-1", "note_url": f"https://xhs/{query}-1", "title": "Title 1"},
+                    {"note_id": f"{query}-2", "note_url": f"https://xhs/{query}-2", "title": "Title 2"},
+                ]
+            client.search_notes = fake_search
             config = source_config(
                 write_rules(tmp),
                 DetailFetchConfig(fixed_delay_seconds=1.5, random_delay_seconds=0.8),
@@ -531,22 +574,24 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(notes), 2)
         sleep.assert_called_once_with(1.9)
+        self.assertEqual(client.calls[1][0], "fetch_note")
         self.assertEqual(client.calls[2][0], "fetch_note")
-        self.assertEqual(client.calls[3][0], "fetch_note")
 
     def test_collect_does_not_sleep_for_zero_or_single_fetch_delay(self):
         with TemporaryDirectory() as tmp:
             single_client = DetailFilteringClient()
             single_config = SourcesConfig(
-                keywords=KeywordSourceConfig(True, write_rules(tmp), 5, 1, 2),
-                homefeed=HomefeedSourceConfig(False, (), 3),
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), search_limit_per_query=5, sort_type=1, note_type=2, weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0),
                 detail_fetch=DetailFetchConfig(fixed_delay_seconds=2),
             )
             single_source = XhsSource(
                 XhsConfig("cookie"),
                 single_config,
                 client=single_client,
+                rng=DeterministicRandom([0.0] * 10),
             )
+
             with patch("rednote2tg.xhs_source.time.sleep") as single_sleep:
                 single_source.collect(active_note_ids={"published-1"})
 
@@ -572,7 +617,7 @@ class XhsSourceTest(unittest.TestCase):
                 notes, errors = source.collect()
 
         self.assertEqual(len(errors), 1)
-        self.assertEqual(len(notes), 1)
+        self.assertEqual(len(notes), 0)
         self.assertIn("keyword source failed: a b c", logs.output[0])
 
     def test_invalid_keyword_rules_skips_keyword_and_keeps_homefeed(self):
@@ -587,8 +632,64 @@ class XhsSourceTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].source_type, "keyword")
         self.assertEqual(errors[0].source_key, "generated")
-        self.assertEqual([call[0] for call in client.calls], ["homefeed", "fetch_note"])
-        self.assertEqual([note.source.source_type for note in notes], ["homefeed"])
+        self.assertEqual(notes, [])
+
+    def test_homefeed_pagination_refresh_type_and_note_index(self):
+        with TemporaryDirectory() as tmp:
+            client = FakeXhsClient()
+            calls = []
+            def fake_get_homefeed(category, cursor_score, refresh_type, note_index, **kwargs):
+                calls.append((refresh_type, cursor_score, note_index, kwargs.get("num"), kwargs.get("need_num")))
+                page = len(calls)
+                return True, "ok", {
+                    "data": {
+                        "items": [
+                            {
+                                "note_id": f"page-{page}-1",
+                                "url": f"https://xhs/page-{page}-1",
+                                "note_card": {
+                                    "interact_info": {"liked_count": "10", "collected_count": "5"}
+                                }
+                            }
+                        ],
+                        "cursor_score": f"cursor-{page}",
+                    }
+                }
+            client.get_homefeed_recommend = fake_get_homefeed
+            config = SourcesConfig(
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), weight=0.0),
+                homefeed=HomefeedSourceConfig(weight=1.0, limit_per_page=20),
+            )
+            source = XhsSource(XhsConfig("cookie"), config, client=client)
+            session = source.start_collection()
+
+            first_batch = session.collect_next()
+            second_batch = session.collect_next()
+
+            self.assertEqual(calls[0], (1, "", 0, 20, 10))
+            self.assertEqual(calls[1], (3, "cursor-1", 1, 20, 10))
+            self.assertEqual([n.note_id for n in first_batch.notes], ["page-1-1"])
+            self.assertEqual([n.note_id for n in second_batch.notes], ["page-2-1"])
+
+    def test_source_weight_selection(self):
+        with TemporaryDirectory() as tmp:
+            client = FakeXhsClient()
+            config_kw = SourcesConfig(
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), weight=1.0),
+                homefeed=HomefeedSourceConfig(weight=0.0, limit_per_page=3),
+            )
+            rng = random.Random(42)
+            source_kw = XhsSource(XhsConfig("cookie"), config_kw, client=client, rng=rng)
+            session_kw = source_kw.start_collection()
+            self.assertEqual(session_kw.source_type, "keyword")
+
+            config_hf = SourcesConfig(
+                keywords=KeywordSourceConfig(rules_path=write_rules(tmp), weight=0.0),
+                homefeed=HomefeedSourceConfig(weight=1.0, limit_per_page=3),
+            )
+            source_hf = XhsSource(XhsConfig("cookie"), config_hf, client=client, rng=rng)
+            session_hf = source_hf.start_collection()
+            self.assertEqual(session_hf.source_type, "homefeed")
 
     def test_weighted_rules_select_b_and_search_once(self):
         with TemporaryDirectory() as tmp:

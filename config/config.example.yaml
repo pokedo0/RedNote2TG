@@ -8,7 +8,7 @@ xhs:
 
 sources:
   keywords:
-    enabled: true
+    weight: 0.7
     # Legacy single-rule mode still works:
     # rules_path: "https://gist.github.com/XXX/raw/xhs_keyword_rules.yaml"
     rules:
@@ -22,10 +22,9 @@ sources:
     sort_type: 0
     note_type: 0
   homefeed:
-    enabled: false
-    categories:
-      - "homefeed_recommend"
-    limit_per_category: 20
+    weight: 0.3
+    category: "homefeed.fashion_v3"  # 推荐频道/分类 ID（支持自定义 tag/category，如 homefeed.fashion_v3 穿搭、homefeed_recommend 默认推荐）
+    limit_per_page: 20
   # 批量抓取笔记详情时，相邻两次请求的间隔 = fixed_delay_seconds + random_delay_seconds 内的均匀随机值
   detail_fetch:
     fixed_delay_seconds: 7

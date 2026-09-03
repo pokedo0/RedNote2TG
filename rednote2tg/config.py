@@ -37,19 +37,39 @@ class KeywordRuleSourceConfig:
 
 @dataclass(frozen=True)
 class KeywordSourceConfig:
-    enabled: bool = True
     rules_path: str = ""
     search_limit_per_query: int = 20
     sort_type: int = 0
     note_type: int = 0
     rules: tuple[KeywordRuleSourceConfig, ...] = ()
+    weight: float = 1.0
+    enabled: bool | None = None
+
+    def __post_init__(self):
+        if self.enabled is not None:
+            if not self.enabled:
+                object.__setattr__(self, "weight", 0.0)
+        else:
+            object.__setattr__(self, "enabled", self.weight > 0)
 
 
 @dataclass(frozen=True)
 class HomefeedSourceConfig:
-    enabled: bool = False
-    categories: tuple[str, ...] = ()
-    limit_per_category: int = 20
+    category: str = "homefeed.fashion_v3"
+    limit_per_page: int = 20
+    weight: float = 1.0
+    enabled: bool | None = None
+
+    @property
+    def tag(self) -> str:
+        return self.category
+
+    def __post_init__(self):
+        if self.enabled is not None:
+            if not self.enabled:
+                object.__setattr__(self, "weight", 0.0)
+        else:
+            object.__setattr__(self, "enabled", self.weight > 0)
 
 
 @dataclass(frozen=True)
@@ -189,26 +209,50 @@ def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesCo
     keywords_data = data.get("keywords") or {}
     homefeed_data = data.get("homefeed") or {}
     detail_fetch_data = data.get("detail_fetch") or {}
-    keywords_enabled = bool(keywords_data.get("enabled", True))
+    keywords_enabled = keywords_data.get("enabled")
+    if keywords_enabled is False:
+        keywords_weight = 0.0
+    elif "weight" in keywords_data:
+        keywords_weight = _nonnegative_float(keywords_data["weight"], "sources.keywords.weight")
+    else:
+        keywords_weight = 1.0
+
+    homefeed_enabled = homefeed_data.get("enabled")
+    if homefeed_enabled is False:
+        homefeed_weight = 0.0
+    elif "weight" in homefeed_data:
+        homefeed_weight = _nonnegative_float(homefeed_data["weight"], "sources.homefeed.weight")
+    else:
+        homefeed_weight = 1.0 if homefeed_data else 0.0
+
     rules_path = str(keywords_data.get("rules_path") or "").strip()
     rules = _parse_keyword_rule_sources(keywords_data.get("rules"), base_path)
     if rules_path and rules:
         raise ConfigError("sources.keywords.rules_path cannot be used with sources.keywords.rules")
-    if keywords_enabled and not rules_path and not rules:
-        raise ConfigError("sources.keywords.rules_path or sources.keywords.rules is required when keyword source is enabled")
+    if keywords_weight > 0 and not rules_path and not rules:
+        raise ConfigError("sources.keywords.rules_path or sources.keywords.rules is required when keyword source has weight > 0")
     rules_path = _resolve_optional_path(rules_path, base_path)
+
+    if keywords_weight + homefeed_weight <= 0:
+        raise ConfigError("sources.keywords.weight and sources.homefeed.weight cannot both be 0; at least one source must have weight > 0")
+
     keywords = KeywordSourceConfig(
-        enabled=keywords_enabled,
         rules_path=rules_path,
         search_limit_per_query=_positive_int(keywords_data.get("search_limit_per_query", 20), "sources.keywords.search_limit_per_query"),
         sort_type=int(keywords_data.get("sort_type", 0)),
         note_type=int(keywords_data.get("note_type", 0)),
         rules=rules,
+        weight=keywords_weight,
     )
+    limit_per_page = _positive_int(homefeed_data.get("limit_per_page", 20), "sources.homefeed.limit_per_page")
+    if limit_per_page > 40:
+        raise ConfigError("sources.homefeed.limit_per_page must be at most 40")
+    category_val = homefeed_data.get("category") or homefeed_data.get("tag") or "homefeed.fashion_v3"
+    category = str(category_val).strip() or "homefeed.fashion_v3"
     homefeed = HomefeedSourceConfig(
-        enabled=bool(homefeed_data.get("enabled", False)),
-        categories=tuple(str(c).strip() for c in homefeed_data.get("categories") or () if str(c).strip()),
-        limit_per_category=_positive_int(homefeed_data.get("limit_per_category", 20), "sources.homefeed.limit_per_category"),
+        category=category,
+        limit_per_page=limit_per_page,
+        weight=homefeed_weight,
     )
     detail_fetch = DetailFetchConfig(
         fixed_delay_seconds=_nonnegative_float(
