@@ -321,7 +321,7 @@ class RuntimeState:
                 return
 
             _replace_config_cookie(self.config_path, merged_cookie)
-            updated_xhs = XhsConfig(cookies=merged_cookie, proxies=self.config.xhs.proxies)
+            updated_xhs = XhsConfig(cookies=merged_cookie)
             updated_config = replace(self.config, xhs=updated_xhs)
             self.runner.config = updated_config
             self.config = updated_config
@@ -680,7 +680,7 @@ async def handle_update_cookie(
 
     # Build first so a constructor failure cannot invalidate the active client.
     try:
-        new_xhs_config = XhsConfig(cookies=new_cookie, proxies=runner.config.xhs.proxies)
+        new_xhs_config = XhsConfig(cookies=new_cookie)
         new_client = XhsSource._create_client(new_xhs_config)
         if new_client is None:
             await message.answer("❌ 新Cookie验证失败（登录已过期），请确认Cookie有效性")
@@ -706,7 +706,7 @@ async def handle_update_cookie(
 
     # Swap last; replace_client closes the previous application-owned client.
     runner.source.replace_client(new_client, owned=True)
-    updated_xhs = XhsConfig(cookies=new_cookie, proxies=new_xhs_config.proxies)
+    updated_xhs = XhsConfig(cookies=new_cookie)
     updated_config = replace(runner.config, xhs=updated_xhs)
     runner.config = updated_config
     if state is not None:

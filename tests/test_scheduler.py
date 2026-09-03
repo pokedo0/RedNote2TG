@@ -1149,7 +1149,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
             state.config_path = str(config_path)
             register_schedules(scheduler, config, state)
 
-            data["xhs"] = {"cookies": "fresh-cookie", "proxies": {"http": "http://proxy"}}
+            data["xhs"] = {"cookies": "fresh-cookie"}
             data["sources"]["keywords"]["search_limit_per_query"] = 7
             data["sources"]["homefeed"] = {
                 "enabled": True,

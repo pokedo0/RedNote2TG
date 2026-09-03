@@ -34,7 +34,7 @@ Runtime config is loaded from `config/config.yaml` by `rednote2tg.config.load_co
 Top-level config keys:
 
 - `telegram`: `bot_token`, `channel_id`, `admin_user_ids`.
-- `xhs`: `cookies`, optional `proxies`.
+- `xhs`: `cookies`.
 - `sources.keywords`: `enabled`, `rules_path`, `search_limit_per_query`, `sort_type`, `note_type`.
 - `sources.homefeed`: `enabled`, `categories`, `limit_per_category`.
 - `publishing`: `notes_per_run`, `telegram_retry_after_padding_seconds`, `upload_live_photo`.

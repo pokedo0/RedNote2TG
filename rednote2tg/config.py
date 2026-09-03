@@ -26,7 +26,6 @@ class TelegramConfig:
 @dataclass(frozen=True)
 class XhsConfig:
     cookies: str
-    proxies: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -181,10 +180,9 @@ def _parse_xhs(data: dict) -> XhsConfig:
     cookies = str(data.get("cookies") or "").strip()
     if not cookies:
         raise ConfigError("xhs.cookies is required")
-    proxies = data.get("proxies")
-    if proxies is not None and not isinstance(proxies, dict):
-        raise ConfigError("xhs.proxies must be null or a mapping")
-    return XhsConfig(cookies, proxies)
+    if data.get("proxies") is not None:
+        logger.warning("xhs.proxies is deprecated and ignored; upstream Spider_XHS has removed proxies support")
+    return XhsConfig(cookies)
 
 
 def _parse_sources(data: dict, base_path: str | Path | None = None) -> SourcesConfig:

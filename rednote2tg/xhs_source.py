@@ -97,7 +97,6 @@ class XhsSource:
         logger.info("creating XHS auth client from configured cookie")
         auth = XHSPcAuth.from_cookie(
             xhs_config.cookies,
-            proxies=xhs_config.proxies,
         )
         try:
             return XhsPcAuthClient(auth)
