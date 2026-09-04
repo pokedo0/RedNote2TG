@@ -111,9 +111,12 @@ class TelegramPublisherTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("时间：today", caption)
         self.assertNotIn("IP：Shanghai", caption)
 
-    def test_clean_note_url_strips_query_and_fragment(self):
-        url = "https://www.xiaohongshu.com/explore/6a2d79ff?xsec_token=abc&xsec_source=pc_search#comments"
-        self.assertEqual(clean_note_url(url), "https://www.xiaohongshu.com/explore/6a2d79ff")
+    def test_clean_note_url_preserves_xsec_params_and_strips_fragment(self):
+        url = "https://www.xiaohongshu.com/explore/6a2d79ff?utm_source=share&xsec_token=abc&xsec_source=pc_search#comments"
+        self.assertEqual(
+            clean_note_url(url),
+            "https://www.xiaohongshu.com/explore/6a2d79ff?xsec_token=abc&xsec_source=pc_search",
+        )
         self.assertEqual(clean_note_url("https://xhs/123"), "https://xhs/123")
 
     def test_caption_extracts_topics_into_bold_quote_block(self):

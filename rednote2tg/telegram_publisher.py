@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, ClassVar
 
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.methods.base import TelegramMethod
@@ -216,7 +216,12 @@ def clean_note_url(url: str) -> str:
     parts = urlsplit(url)
     if not parts.query and not parts.fragment:
         return url
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    preserved_params: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key in ("xsec_token", "xsec_source"):
+            preserved_params.append((key, value))
+    clean_query = urlencode(preserved_params)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, clean_query, ""))
 
 
 def _retry_after_failure(exc: TelegramRetryAfter) -> PublishResult:
